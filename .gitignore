@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+logs/
+*.log
+
+.DS_Store
+__MACOSX/
+
+# Large local data/model assets should be stored with Git LFS or Releases.
+model/
+CT图像/
