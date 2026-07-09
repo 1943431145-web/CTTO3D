@@ -1,0 +1,34 @@
+{
+  "simulation": {
+    "power_range_w": [
+      5.0,
+      200.0
+    ],
+    "time_range_s": [
+      30.0,
+      1800.0
+    ],
+    "default_power_w": 30.0,
+    "default_time_s": 300.0,
+    "default_speed": "20×",
+    "tau_s": 150.0,
+    "r_base_mm": 3.5,
+    "r_per_sqrt_w": 1.7,
+    "r_max_mm": 28.0,
+    "elongation": 1.25,
+    "min_half_mm": 0.5
+  },
+  "safety": {
+    "max_power_warning_w": 100.0,
+    "max_time_warning_s": 900.0,
+    "max_short_diameter_mm": 30.0,
+    "max_long_diameter_mm": 50.0,
+    "default_safety_distance_mm": 5.0
+  },
+  "needle": {
+    "default_diameter_mm": 1.6,
+    "default_active_mm": 5.0,
+    "default_shaft_mm": 150.0
+  },
+  "version": "1.0"
+}
