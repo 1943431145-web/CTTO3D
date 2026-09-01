@@ -38,8 +38,6 @@
 
 import os
 import re
-import shutil
-import tempfile
 import zipfile
 
 import numpy as np
@@ -48,6 +46,112 @@ from vtk.util import numpy_support
 
 # 支持的图片文件扩展名（全部小写比较）
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+
+
+def _clean_dicom_text(value):
+    return str(value or "").replace("^", " ").strip()
+
+
+def _dicom_preview_metadata(ds):
+    """从不含像素数据的 DICOM 头提取左侧影像列表所需的轻量信息。"""
+    rows = getattr(ds, "Rows", None)
+    cols = getattr(ds, "Columns", None)
+    result = {
+        "patient_name": _clean_dicom_text(getattr(ds, "PatientName", "")),
+        "patient_id": _clean_dicom_text(getattr(ds, "PatientID", "")),
+        "modality": _clean_dicom_text(getattr(ds, "Modality", "")).upper(),
+        "study_date": _clean_dicom_text(getattr(ds, "StudyDate", "")),
+        "series_description": _clean_dicom_text(
+            getattr(ds, "SeriesDescription", "")),
+    }
+    if rows and cols:
+        result["dimensions_text"] = "%s×%s" % (cols, rows)
+    return {key: value for key, value in result.items() if value}
+
+
+def _inspect_dicom_folder(directory, max_attempts=128):
+    import pydicom
+
+    attempts = 0
+    for root, _, names in os.walk(directory):
+        for name in names:
+            if attempts >= max_attempts:
+                return {}
+            attempts += 1
+            try:
+                ds = pydicom.dcmread(
+                    os.path.join(root, name),
+                    stop_before_pixels=True,
+                    force=True,
+                )
+            except Exception:
+                continue
+            metadata = _dicom_preview_metadata(ds)
+            if metadata.get("modality") or metadata.get("patient_name"):
+                return metadata
+    return {}
+
+
+def _inspect_zip(zip_path, max_attempts=128):
+    metadata = {}
+    with zipfile.ZipFile(zip_path) as zf:
+        names = [item for item in zf.namelist() if not item.endswith("/")]
+        metadata["file_count"] = len(names)
+        try:
+            import pydicom
+            for name in names[:max_attempts]:
+                try:
+                    with zf.open(name) as stream:
+                        ds = pydicom.dcmread(
+                            stream, stop_before_pixels=True, force=True)
+                except Exception:
+                    continue
+                dicom_meta = _dicom_preview_metadata(ds)
+                if dicom_meta.get("modality") or dicom_meta.get("patient_name"):
+                    metadata.update(dicom_meta)
+                    break
+        except ImportError:
+            pass
+    return metadata
+
+
+def inspect_source(kind, path):
+    """轻量检查数据源，不读取像素体数据，供“导入后待加载”列表显示。"""
+    if kind == "dicom":
+        return _inspect_dicom_folder(path)
+    if kind == "zip":
+        return _inspect_zip(path)
+    if kind == "images":
+        files = _gather_images(path)
+        result = {"modality": "IMAGE", "file_count": len(files)}
+        if files:
+            try:
+                from PIL import Image
+                with Image.open(files[0]) as image:
+                    result["dimensions_text"] = "%d×%d · %d 张" % (
+                        image.width, image.height, len(files))
+            except Exception:
+                pass
+        return result
+    return {}
+
+
+def detect_source_kind(path):
+    """根据路径自动判断导入类型：zip / dicom / images。"""
+    path = os.path.realpath(os.path.abspath(path))
+    if os.path.isfile(path):
+        if path.lower().endswith(".zip"):
+            return "zip"
+        raise ValueError("暂不支持该文件类型:\n%s" % path)
+    if not os.path.isdir(path):
+        raise ValueError("路径不存在:\n%s" % path)
+    dicom_meta = _inspect_dicom_folder(path)
+    if dicom_meta.get("modality") or dicom_meta.get("patient_name"):
+        return "dicom"
+    if _gather_images(path):
+        return "images"
+    # 空目录或无法识别时仍按 DICOM 走，加载阶段会给出明确错误。
+    return "dicom"
 
 
 def _natural_key(s):
@@ -59,32 +163,47 @@ def _natural_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
 
-def _numpy_to_vtk(arr, spacing, modality):
-    """将 (z, y, x) float32 的 numpy 数组转换为 vtkImageData。
+def _notify_progress(callback, fraction, message):
+    """向可选的加载进度回调发送节流友好的标准化进度。"""
+    if callback is not None:
+        callback(max(0.0, min(1.0, float(fraction))), str(message))
+
+
+def _numpy_to_vtk(arr, spacing, modality, scalar_range=None):
+    """将 (z, y, x) 连续 numpy 数组零拷贝转换为 vtkImageData。
     
     注意：numpy 的 C-order 存储中，x 维度在内存中连续变化，
     这与 vtkImageData 期望的点顺序一致，无需转置。
     
     参数：
-      arr     — numpy 数组，形状 (z, y, x)，dtype=float32
+      arr     — numpy 数组，形状 (z, y, x)，保留 int16/uint8 等源 dtype
       spacing — (sx, sy, sz) 体素间距，单位 mm
       modality — 模态标签 ("CT" / "MR" / "IMAGE")
     
     返回：
       (vtkImageData, info_dict) 元组
     """
-    arr = np.ascontiguousarray(arr, dtype=np.float32)
+    # 保留源数据的最小可用 dtype。旧实现无条件转 float32，并在
+    # numpy_to_vtk(deep=True) 时再复制一次；一个 512×512×670 CT 因此会
+    # 同时占用两份约 670 MiB 的体数据。VTK 的 numpy bridge 会在 shallow
+    # 模式下持有 numpy 引用，可以安全地让两边共享同一块只读体素内存。
+    arr = np.ascontiguousarray(arr)
+    if arr.dtype == np.bool_:
+        arr = arr.astype(np.uint8)
     z, y, x = arr.shape
-    # 将 numpy 数组展平为 VTK 可识别的线性存储
-    flat = numpy_support.numpy_to_vtk(arr.ravel(order="C"), deep=True,
-                                      array_type=vtk.VTK_FLOAT)
+    flat_view = arr.reshape(-1)
+    flat = numpy_support.numpy_to_vtk(flat_view, deep=False)
     img = vtk.vtkImageData()
     img.SetDimensions(x, y, z)
     img.SetSpacing(float(spacing[0]), float(spacing[1]), float(spacing[2]))
     img.GetPointData().SetScalars(flat)
+    if scalar_range is None:
+        scalar_range = (float(arr.min()), float(arr.max()))
     info = {"modality": modality,
-            "scalar_range": (float(arr.min()), float(arr.max())),
-            "dimensions": (x, y, z)}
+            "scalar_range": tuple(float(value) for value in scalar_range),
+            "dimensions": (x, y, z),
+            "storage_dtype": str(arr.dtype),
+            "memory_bytes": int(arr.nbytes)}
     return img, info
 
 
@@ -183,7 +302,157 @@ def _select_dicom_series(slices):
     return max(groups.values(), key=_dicom_group_score)
 
 
-def load_dicom_series(directory):
+def _select_dicom_series_records(records):
+    """records 为 (source, header)；只用轻量 header 完成序列选择。"""
+    groups = {}
+    for source, header in records:
+        groups.setdefault(_dicom_series_key(header), []).append(
+            (source, header))
+    return max(
+        groups.values(),
+        key=lambda items: _dicom_group_score([item[1] for item in items]),
+    )
+
+
+def _load_dicom_sources(sources, read_dataset, progress=None):
+    """从路径或 ZIP member 等抽象数据源流式构建体数据。
+
+    第一遍只读 PixelData 之前的头信息；选定主序列后第二遍逐张解码，
+    Dataset 和 pixel_array 每轮即释放，避免把整套原始像素再保留一份。
+    """
+    sources = list(sources)
+    records = []
+    total_sources = max(1, len(sources))
+    for index, source in enumerate(sources):
+        try:
+            header = read_dataset(source, True)
+        except Exception:
+            continue
+        if getattr(header, "Rows", None) and getattr(header, "Columns", None):
+            records.append((source, header))
+        if index % 32 == 0 or index + 1 == len(sources):
+            _notify_progress(
+                progress, 0.14 * (index + 1) / total_sources,
+                "正在识别 DICOM 序列…")
+
+    if not records:
+        raise ValueError("No DICOM images with pixel data were found.")
+
+    records = _select_dicom_series_records(records)
+    records.sort(key=lambda item: _dicom_slice_position(item[1]))
+    ref = records[0][1]
+    rows, cols = int(ref.Rows), int(ref.Columns)
+    records = [
+        item for item in records
+        if int(item[1].Rows) == rows and int(item[1].Columns) == cols
+    ]
+
+    modality = str(getattr(ref, "Modality", "CT") or "CT").upper()
+    if modality not in ("CT", "MR"):
+        modality = "CT"
+
+    # 绝大多数 CT 的校准 HU 完整落在 int16，可把 CPU/GPU 体数据直接减半。
+    # 遇到小数缩放或超范围数据会自动提升为 float32，绝不静默截断。
+    volume = np.empty(
+        (len(records), rows, cols),
+        dtype=np.int16 if modality == "CT" else np.float32,
+    )
+    loaded = 0
+    scalar_min = float("inf")
+    scalar_max = float("-inf")
+    total_records = max(1, len(records))
+
+    for index, (source, _header) in enumerate(records):
+        try:
+            dataset = read_dataset(source, False)
+            if "PixelData" not in dataset:
+                continue
+            pixels = np.asarray(dataset.pixel_array)
+        except Exception:
+            continue
+        if pixels.ndim != 2 or pixels.shape != (rows, cols):
+            continue
+
+        slope = float(getattr(dataset, "RescaleSlope", 1.0) or 1.0)
+        intercept = float(getattr(dataset, "RescaleIntercept", 0.0) or 0.0)
+        raw_min = float(pixels.min())
+        raw_max = float(pixels.max())
+        value0 = raw_min * slope + intercept
+        value1 = raw_max * slope + intercept
+        plane_min, plane_max = min(value0, value1), max(value0, value1)
+
+        if volume.dtype == np.int16:
+            integral = slope.is_integer() and intercept.is_integer()
+            in_range = plane_min >= -32768.0 and plane_max <= 32767.0
+            if not (integral and in_range):
+                promoted = np.empty(volume.shape, dtype=np.float32)
+                if loaded:
+                    promoted[:loaded] = volume[:loaded]
+                volume = promoted
+
+        if volume.dtype == np.int16:
+            # int32 的单层临时量规避 uint16 + 负截距时的中间溢出；它只在
+            # 当前循环存活，远小于旧实现保留全部 Dataset/PixelData 的峰值。
+            transformed = pixels.astype(np.int32, copy=True)
+            if slope != 1.0:
+                transformed *= int(slope)
+            if intercept:
+                transformed += int(intercept)
+            volume[loaded] = transformed
+        else:
+            np.multiply(pixels, slope, out=volume[loaded], casting="unsafe")
+            if intercept:
+                np.add(volume[loaded], intercept,
+                       out=volume[loaded], casting="unsafe")
+
+        loaded += 1
+        scalar_min = min(scalar_min, plane_min)
+        scalar_max = max(scalar_max, plane_max)
+        if index % 8 == 0 or index + 1 == len(records):
+            _notify_progress(
+                progress, 0.14 + 0.80 * (index + 1) / total_records,
+                "正在解码 CT 切片 %d/%d…" % (index + 1, len(records)))
+
+    if loaded == 0:
+        raise ValueError("No readable DICOM pixel data were found.")
+    if loaded != len(volume):
+        volume = np.ascontiguousarray(volume[:loaded])
+
+    ps = getattr(ref, "PixelSpacing", None) or [1.0, 1.0]
+    sx, sy = float(ps[1]), float(ps[0])
+    sz = float(getattr(ref, "SpacingBetweenSlices", 0) or 0)
+    if sz <= 0:
+        sz = float(getattr(ref, "SliceThickness", 0) or 0)
+    positions = [_dicom_slice_position(header) for _, header in records]
+    diffs = [
+        abs(b - a) for a, b in zip(positions, positions[1:])
+        if abs(b - a) > 1e-4
+    ]
+    if diffs:
+        sz = float(np.median(diffs))
+    if sz <= 0:
+        sz = 1.0
+
+    _notify_progress(progress, 0.97, "正在建立三维体数据…")
+    image, info = _numpy_to_vtk(
+        volume, (sx, sy, sz), modality,
+        scalar_range=(scalar_min, scalar_max),
+    )
+    # 保留 DICOM 患者坐标系。vtkImageData 仍使用紧凑的局部 i/j/k 坐标，
+    # 但重置相机时需要这些方向余弦，才能把“患者前方、头侧朝上”换算到
+    # 当前体数据坐标，而不是把所有病例都武断地当作标准仰卧位。
+    orientation = getattr(ref, "ImageOrientationPatient", None)
+    if orientation is not None and len(orientation) == 6:
+        info["image_orientation_patient"] = tuple(
+            float(value) for value in orientation)
+    patient_position = str(getattr(ref, "PatientPosition", "") or "").strip()
+    if patient_position:
+        info["patient_position"] = patient_position
+    _notify_progress(progress, 1.0, "影像解码完成")
+    return image, info
+
+
+def load_dicom_series(directory, progress=None):
     """从指定目录及其子目录加载一个完整的 DICOM 序列。
     
     自动完成：
@@ -204,60 +473,21 @@ def load_dicom_series(directory):
     """
     import pydicom
 
-    slices = []
+    sources = []
     for root, _, names in os.walk(directory):
         for n in names:
-            path = os.path.join(root, n)
-            try:
-                ds = pydicom.dcmread(path, force=True)
-            except Exception:
-                continue
-            # 过滤：必须有像素数据和尺寸信息
-            if "PixelData" in ds and getattr(ds, "Rows", None) and getattr(ds, "Columns", None):
-                slices.append(ds)
+            sources.append(os.path.join(root, n))
 
-    if not slices:
-        raise ValueError("No DICOM images with pixel data were found in:\n%s" % directory)
+    def read_dataset(path, header_only):
+        return pydicom.dcmread(
+            path, stop_before_pixels=header_only, force=True)
 
-    # 自动选择最佳序列
-    slices = _select_dicom_series(slices)
-    # 按切片位置（Z方向）排序
-    slices.sort(key=_dicom_slice_position)
-    ref = slices[0]
-    rows, cols = int(ref.Rows), int(ref.Columns)
-
-    # 排除尺寸不一致的切片
-    slices = [s for s in slices if int(s.Rows) == rows and int(s.Columns) == cols]
-
-    # 构建三维体数据数组
-    vol = np.zeros((len(slices), rows, cols), dtype=np.float32)
-    for i, ds in enumerate(slices):
-        px = ds.pixel_array.astype(np.float32)
-        # 应用 DICOM 的线性转换：HU = pixel × slope + intercept
-        slope = float(getattr(ds, "RescaleSlope", 1.0) or 1.0)
-        intercept = float(getattr(ds, "RescaleIntercept", 0.0) or 0.0)
-        vol[i] = px * slope + intercept
-
-    # 提取像素间距
-    ps = getattr(ref, "PixelSpacing", None) or [1.0, 1.0]
-    sx, sy = float(ps[1]), float(ps[0])  # 注意：PixelSpacing = [行距, 列距]
-    sz = float(getattr(ref, "SpacingBetweenSlices", 0) or 0)
-    if sz <= 0:
-        sz = float(getattr(ref, "SliceThickness", 0) or 0)
-
-    # 从实际切片位置估算 Z 间距（比元数据更可靠）
-    positions = [_dicom_slice_position(s) for s in slices]
-    diffs = [abs(b - a) for a, b in zip(positions, positions[1:]) if abs(b - a) > 1e-4]
-    if diffs:
-        sz = float(np.median(diffs))  # 用中位数抗异常
-    if sz <= 0:
-        sz = 1.0
-
-    # 规范化模态标签
-    modality = str(getattr(ref, "Modality", "CT") or "CT").upper()
-    if modality not in ("CT", "MR"):
-        modality = "CT"
-    return _numpy_to_vtk(vol, (sx, sy, sz), modality)
+    try:
+        return _load_dicom_sources(sources, read_dataset, progress=progress)
+    except ValueError as exc:
+        raise ValueError(
+            "No DICOM images with pixel data were found in:\n%s" % directory
+        ) from exc
 
 
 # ============================================================
@@ -284,7 +514,43 @@ def _gather_images(directory):
     return best
 
 
-def load_image_stack(directory, slice_spacing=1.0, pixel_spacing=1.0):
+def _load_image_sources(files, read_image, spacing, progress=None):
+    """以 uint8/原始灰度逐层写入连续数组，避免 planes + stack 双份内存。"""
+    if not files:
+        raise ValueError("No image files were found.")
+    first = np.asarray(read_image(files[0]))
+    if first.ndim != 2:
+        raise ValueError("Image slices must be grayscale.")
+    h, w = first.shape
+    volume = np.empty((len(files), h, w), dtype=first.dtype)
+    volume[0] = first
+    loaded = 1
+    scalar_min = float(first.min())
+    scalar_max = float(first.max())
+    for index, source in enumerate(files[1:], 1):
+        plane = np.asarray(read_image(source))
+        if plane.shape != (h, w):
+            continue
+        if plane.dtype != volume.dtype:
+            plane = plane.astype(volume.dtype)
+        volume[loaded] = plane
+        loaded += 1
+        scalar_min = min(scalar_min, float(plane.min()))
+        scalar_max = max(scalar_max, float(plane.max()))
+        if index % 8 == 0 or index + 1 == len(files):
+            _notify_progress(
+                progress, 0.95 * (index + 1) / len(files),
+                "正在读取图片切片 %d/%d…" % (index + 1, len(files)))
+    if loaded != len(volume):
+        volume = np.ascontiguousarray(volume[:loaded])
+    image, info = _numpy_to_vtk(
+        volume, spacing, "IMAGE", (scalar_min, scalar_max))
+    _notify_progress(progress, 1.0, "图片序列解码完成")
+    return image, info
+
+
+def load_image_stack(directory, slice_spacing=1.0, pixel_spacing=1.0,
+                     progress=None):
     """从文件夹加载一组有序的 PNG/JPG/TIFF/BMP 切片作为三维体数据。
     
     参数：
@@ -305,19 +571,15 @@ def load_image_stack(directory, slice_spacing=1.0, pixel_spacing=1.0):
         raise ValueError("No image files (%s) found in:\n%s"
                          % (", ".join(IMAGE_EXTS), directory))
 
-    # 读取第一张图片确定尺寸
-    first = np.asarray(Image.open(files[0]).convert("L"), dtype=np.float32)
-    h, w = first.shape
-    planes = [first]
-    # 逐一读取剩余图片，只接受尺寸匹配的
-    for f in files[1:]:
-        a = np.asarray(Image.open(f).convert("L"), dtype=np.float32)
-        if a.shape == (h, w):
-            planes.append(a)
+    def read_image(path):
+        with Image.open(path) as image:
+            return np.asarray(image.convert("L"), dtype=np.uint8)
 
-    # 沿 Z 轴堆叠
-    vol = np.stack(planes, axis=0)
-    return _numpy_to_vtk(vol, (pixel_spacing, pixel_spacing, slice_spacing), "IMAGE")
+    return _load_image_sources(
+        files, read_image,
+        (pixel_spacing, pixel_spacing, slice_spacing),
+        progress=progress,
+    )
 
 
 def load_folder_auto(directory):
@@ -331,7 +593,7 @@ def load_folder_auto(directory):
         return load_image_stack(directory)
 
 
-def load_zip(zip_path):
+def load_zip(zip_path, progress=None):
     """解压 ZIP 压缩包并加载其中的 DICOM 或图片序列数据。
     
     工作流程：
@@ -353,20 +615,43 @@ def load_zip(zip_path):
     if not zipfile.is_zipfile(zip_path):
         raise ValueError("Not a valid ZIP archive:\n%s" % zip_path)
 
-    tmp = tempfile.mkdtemp(prefix="ctto3d_zip_")
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            # 路径遍历漏洞防护：检查所有成员路径在解压目标目录内
-            for member in zf.namelist():
-                dest = os.path.realpath(os.path.join(tmp, member))
-                if not dest.startswith(os.path.realpath(tmp) + os.sep) \
-                        and dest != os.path.realpath(tmp):
-                    raise ValueError("Unsafe path in ZIP archive: %s" % member)
-            zf.extractall(tmp)
-        return load_folder_auto(tmp)
-    finally:
-        # 确保临时目录被清理
-        shutil.rmtree(tmp, ignore_errors=True)
+    import pydicom
+
+    with zipfile.ZipFile(zip_path) as zf:
+        members = [item for item in zf.infolist() if not item.is_dir()]
+
+        # 直接从压缩流读 DICOM，避免先把数百 MiB 写到临时目录再读回来。
+        def read_dataset(member, header_only):
+            with zf.open(member) as stream:
+                return pydicom.dcmread(
+                    stream, stop_before_pixels=header_only, force=True)
+
+        try:
+            return _load_dicom_sources(
+                members, read_dataset, progress=progress)
+        except ValueError:
+            pass
+
+        image_groups = {}
+        for member in members:
+            if member.filename.lower().endswith(IMAGE_EXTS):
+                folder = os.path.dirname(member.filename)
+                image_groups.setdefault(folder, []).append(member)
+        if not image_groups:
+            raise ValueError("ZIP archive contains no DICOM or image series.")
+        files = max(image_groups.values(), key=len)
+        files.sort(key=lambda item: _natural_key(
+            os.path.basename(item.filename)))
+
+        from PIL import Image
+
+        def read_image(member):
+            with zf.open(member) as stream:
+                with Image.open(stream) as image:
+                    return np.asarray(image.convert("L"), dtype=np.uint8)
+
+        return _load_image_sources(
+            files, read_image, (1.0, 1.0, 1.0), progress=progress)
 
 
 # ============================================================

@@ -14,6 +14,7 @@ import colorsys
 import hashlib
 from pathlib import Path
 
+import numpy as np
 import vtk
 from PySide6 import QtCore
 from vtk.util import numpy_support
@@ -163,10 +164,33 @@ SEGMENTATION_PRESETS = {
             "lung_airways_wall",
         ],
     },
+    "肺结节分割（MONAI）": {
+        "engine": "monai_nodule",
+        "task": "lung_nodule",
+        "fast": False,
+        "fastest": False,
+        "sequential": True,
+        "roi_subset": [],
+        "expected_outputs": ["lung_nodule"],
+        # MONAI 结节推理调参（精度优先默认值，与 monai_nodule_runner.py 对齐）：
+        #   threshold → softmax 概率阈值（0.60，减少血管/肺外误报）；
+        #   tta → off（实测翻转平均会冲销该模型概率）
+        #   mode → resample(256³，与训练分布一致) / highres(原生分辨率滑窗，更锐)
+        #   smooth_sigma → 概率图高斯平滑(0.5，去散点且不抹小结节)；
+        #   opening → 开运算半径；min_voxels → 连通域过滤
+        "monai_threshold": 0.60,
+        "monai_tta": "off",
+        "monai_mode": "resample",
+        "monai_smooth_sigma": 0.5,
+        "monai_opening": 1,
+        "monai_min_voxels_256": 2,
+        "monai_min_voxels_native": 5,
+    },
 }
 
 
 SEGMENT_COLORS = {
+    "lung_nodule": (1.0, 0.20, 0.12),
     "spleen": (0.72, 0.20, 0.76),
     "kidney_right": (0.70, 0.28, 0.18),
     "kidney_left": (0.82, 0.36, 0.22),
@@ -222,6 +246,7 @@ SEGMENT_COLORS = {
 }
 
 SEGMENT_LABELS = {
+    "lung_nodule": "肺结节",
     "lung_upper_lobe_left": "左肺上叶",
     "lung_lower_lobe_left": "左肺下叶",
     "lung_upper_lobe_right": "右肺上叶",
@@ -290,11 +315,15 @@ ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WEIGHTS_DIR = PROJECT_ROOT / "model"
+MONAI_NODULE_DIR = DEFAULT_WEIGHTS_DIR / "MONAI_nodule_segresnet_3d_small"
+MONAI_LUNG_ROI_DIR = DEFAULT_WEIGHTS_DIR / "MONAI_lung_roi_segresnet_2d"
+MONAI_REQUIRED_FILES = ("model.pth", "config.yaml", "README.md")
 
 DOWNLOAD_TASK_LABELS = {
     "total_fast": "快速 total 模型（3mm/6mm）",
     "total": "标准 total 模型（1.5mm）",
     "lung_vessels": "肺气道/肺血管模型",
+    "monai_nodule": "MONAI 肺结节分割模型 + 肺区 ROI 模型",
 }
 
 
@@ -304,6 +333,10 @@ def preset_names():
 
 def preset_by_name(name):
     return dict(SEGMENTATION_PRESETS.get(name, SEGMENTATION_PRESETS[preset_names()[0]]))
+
+
+def is_monai_nodule_preset(preset):
+    return (preset or {}).get("engine") == "monai_nodule"
 
 
 def _side_text(side):
@@ -410,6 +443,39 @@ def python_for_totalsegmentator(command):
             if candidate.exists():
                 return str(candidate)
     return sys.executable
+
+
+def monai_nodule_runtime_python():
+    """Return the torch-capable Python installed with TotalSegmentator."""
+    for command in (find_totalsegmentator(), find_totalseg_download_weights()):
+        if not command:
+            continue
+        executable = Path(command[0])
+        candidate = executable.parent.parent / "python.exe"
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
+def monai_nodule_models_ready():
+    return all(
+        (directory / filename).is_file()
+        for directory in (MONAI_NODULE_DIR, MONAI_LUNG_ROI_DIR)
+        for filename in MONAI_REQUIRED_FILES
+    )
+
+
+def monai_nodule_runner_command(*extra_args):
+    runner = Path(__file__).with_name("monai_nodule_runner.py")
+    return [monai_nodule_runtime_python(), "-u", str(runner), *map(str, extra_args)]
+
+
+def monai_nodule_process_env():
+    env = totalseg_process_env()
+    local_libs = PROJECT_ROOT / ".applibs"
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(local_libs) + (os.pathsep + existing if existing else "")
+    return env
 
 
 def download_task_for_preset(preset):
@@ -527,6 +593,108 @@ def mask_statistics(mask_image):
     sx, sy, sz = mask_image.GetSpacing()
     volume_ml = voxels * abs(float(sx) * float(sy) * float(sz)) / 1000.0
     return {"voxels": voxels, "volume_ml": volume_ml}
+
+
+def largest_mask_component(mask_image):
+    """找出 mask 中体素数最多的连通域（6 邻接），返回其质心与统计。
+
+    用于肺结节分割完成后把参考坐标轴自动定位到最大结节。结节 mask 的
+    前景体素通常只有几千个，这里用 numpy 迭代扩张式洪泛（每轮向外扩
+    一层）做连通域标记，避免依赖 scipy（主环境不装 AI 依赖）。
+
+    返回 None（空 mask / 无效输入），或 dict：
+      ijk         最大连通域质心的体素坐标 (i, j, k)（i 沿 x 轴）
+      voxels      该连通域体素数
+      volume_ml   该连通域体积
+      components  mask 内连通域总数
+    """
+    if mask_image is None:
+        return None
+    scalars = mask_image.GetPointData().GetScalars()
+    if scalars is None:
+        return None
+    nx, ny, nz = mask_image.GetDimensions()
+    flat = numpy_support.vtk_to_numpy(scalars)   # C 序：x 最快，(k*ny+j)*nx+i
+    idx = np.flatnonzero(flat)
+    if idx.size == 0:
+        return None
+    fx = idx % nx
+    q = idx // nx
+    fy = q % ny
+    fz = q // ny
+
+    # 只在前景包围盒内分析：结节 mask 前景通常只有几千体素，而整卷
+    # 可能是 512x512x355，全卷布尔运算又慢又吃内存。
+    lo = (int(fz.min()), int(fy.min()), int(fx.min()))
+    hi = (int(fz.max()) + 1, int(fy.max()) + 1, int(fx.max()) + 1)
+    box = flat.reshape(nz, ny, nx)[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] > 0
+    visited = np.zeros(box.shape, bool)
+    sx, sy, sz = mask_image.GetSpacing()
+    voxel_ml = abs(float(sx) * float(sy) * float(sz)) / 1000.0
+
+    def _flood(seed_z, seed_y, seed_x):
+        """从种子 BFS 洪泛一个连通域，返回 (体素数, 质心zyx)。
+
+        以索引数组为前沿逐层扩散，每个前景体素只进前沿一次，
+        成本只与前景体素数成正比，与包围盒大小基本无关。
+        """
+        dz, dy, dx = box.shape
+        fz = np.array([seed_z], np.int64)
+        fy = np.array([seed_y], np.int64)
+        fx = np.array([seed_x], np.int64)
+        visited[seed_z, seed_y, seed_x] = True
+        count = 0
+        sum_z = sum_y = sum_x = 0.0
+        while fz.size:
+            count += int(fz.size)
+            sum_z += float(fz.sum()); sum_y += float(fy.sum()); sum_x += float(fx.sum())
+            # 六邻接方向上收集未访问的前沿；同一轮内用线性索引去重。
+            fronts = []
+            for nz, ny_, nx_ in (
+                    (fz + 1, fy, fx), (fz - 1, fy, fx),
+                    (fz, fy + 1, fx), (fz, fy - 1, fx),
+                    (fz, fy, fx + 1), (fz, fy, fx - 1)):
+                valid = ((nz >= 0) & (nz < dz) & (ny_ >= 0) & (ny_ < dy)
+                         & (nx_ >= 0) & (nx_ < dx))
+                nz, ny_, nx_ = nz[valid], ny_[valid], nx_[valid]
+                if nz.size:
+                    take = box[nz, ny_, nx_] & ~visited[nz, ny_, nx_]
+                    if nz[take].size:
+                        fronts.append((nz[take], ny_[take], nx_[take]))
+            if not fronts:
+                break
+            fz = np.concatenate([f[0] for f in fronts])
+            fy = np.concatenate([f[1] for f in fronts])
+            fx = np.concatenate([f[2] for f in fronts])
+            linear = (fz * dy + fy) * dx + fx
+            linear = np.unique(linear)          # 排序去重
+            fx = linear % dx
+            flat = linear // dx
+            fy = flat % dy
+            fz = flat // dy
+            visited[fz, fy, fx] = True
+        return count, (sum_z / count, sum_y / count, sum_x / count)
+
+    components = 0
+    best = None
+    for seed in np.argwhere(box):
+        z0, y0, x0 = int(seed[0]), int(seed[1]), int(seed[2])
+        if visited[z0, y0, x0]:
+            continue
+        components += 1
+        count, centroid_zyx = _flood(z0, y0, x0)
+        if best is None or count > best[0]:
+            # 质心换算回整卷坐标 (k, j, i) -> (i, j, k)，并加包围盒偏移。
+            cz, cy, cx = centroid_zyx
+            best = (count, (cx + lo[2], cy + lo[1], cz + lo[0]))
+
+    voxels, centroid_ijk = best
+    return {
+        "ijk": tuple(float(v) for v in centroid_ijk),
+        "voxels": voxels,
+        "volume_ml": voxels * voxel_ml,
+        "components": components,
+    }
 
 
 def mask_files(output_dir, expected_names=None):
@@ -661,6 +829,128 @@ class TotalSegmentatorDownloadWorker(QtCore.QObject):
         self._recent_output.append(text)
         if len(self._recent_output) > 60:
             self._recent_output = self._recent_output[-60:]
+
+
+class MonaiNoduleDownloadWorker(QtCore.QObject):
+    progress = QtCore.Signal(str)
+    finished = QtCore.Signal(str)
+    failed = QtCore.Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._process = None
+        self._recent_output = []
+
+    @QtCore.Slot()
+    def run(self):
+        args = monai_nodule_runner_command("--download-only")
+        self.progress.emit("正在检查/下载 MONAI 肺结节模型……")
+        try:
+            self._process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=monai_nodule_process_env(),
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+            for line in self._process.stdout or []:
+                line = clean_progress_text(line)
+                if line:
+                    self._recent_output.append(line)
+                    self._recent_output = self._recent_output[-50:]
+                    self.progress.emit(line)
+            code = self._process.wait()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        if code != 0 or not monai_nodule_models_ready():
+            self.failed.emit(
+                "MONAI 肺结节模型下载失败。\n\n最近输出：\n%s"
+                % "\n".join(self._recent_output)[-1800:])
+            return
+        self.finished.emit("monai_nodule")
+
+    def cancel(self):
+        if self._process is not None and self._process.poll() is None:
+            self._process.terminate()
+
+
+class MonaiNoduleWorker(QtCore.QObject):
+    progress = QtCore.Signal(str)
+    finished = QtCore.Signal(str, list)
+    failed = QtCore.Signal(str)
+
+    def __init__(self, input_path, output_dir, preset, parent=None):
+        super().__init__(parent)
+        self.input_path = str(input_path)
+        self.output_dir = str(output_dir)
+        self.preset = dict(preset)
+        self._process = None
+        self._recent_output = []
+
+    @QtCore.Slot()
+    def run(self):
+        # Do not use ``value or default`` here: zero intentionally disables
+        # smoothing/opening and must survive preset parsing.
+        threshold = float(self.preset.get("monai_threshold", 0.60))
+        tta = str(self.preset.get("monai_tta", "off"))
+        mode = str(self.preset.get("monai_mode", "resample"))
+        smooth = float(self.preset.get("monai_smooth_sigma", 0.5))
+        opening = int(self.preset.get("monai_opening", 1))
+        min_voxels_256 = int(self.preset.get("monai_min_voxels_256", 2))
+        min_voxels_native = int(
+            self.preset.get("monai_min_voxels_native", 5))
+        args = monai_nodule_runner_command(
+            "--input", self.input_path,
+            "--output", self.output_dir,
+            "--device", self.preset.get("device") or "gpu",
+            "--threshold", threshold,
+            "--tta", tta,
+            "--mode", mode,
+            "--smooth-sigma", smooth,
+            "--opening", opening,
+            "--min-voxels-256", min_voxels_256,
+            "--min-voxels-native", min_voxels_native,
+        )
+        self.progress.emit("正在启动 MONAI 肺区定位与肺结节分割……")
+        try:
+            self._process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=monai_nodule_process_env(),
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+            for line in self._process.stdout or []:
+                line = clean_progress_text(line)
+                if line:
+                    self._recent_output.append(line)
+                    self._recent_output = self._recent_output[-60:]
+                    self.progress.emit(line)
+            code = self._process.wait()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        if code != 0:
+            output = "\n".join(self._recent_output)
+            lowered = output.lower()
+            if "out of memory" in lowered or "cuda" in lowered and "memory" in lowered:
+                output = (
+                    "GPU 显存不足。请关闭占用显存的程序后重试，或在设备中选择 CPU。\n\n"
+                    + output)
+            self.failed.emit("MONAI 肺结节分割失败。\n\n最近输出：\n%s" % output[-2200:])
+            return
+        self.finished.emit(self.output_dir, ["lung_nodule"])
+
+    def cancel(self):
+        if self._process is not None and self._process.poll() is None:
+            self._process.terminate()
 
 
 class TotalSegmentatorWorker(QtCore.QObject):

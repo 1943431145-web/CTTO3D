@@ -6,9 +6,12 @@ ctto3d 包 - 消融手术规划系统核心模块
 ============================================================
   ablation.py    — 消融针型号预设 + 消融范围生长模型（椭球体）
   loader.py      — 数据加载（DICOM/图片序列/ZIP/演示体模）
+  needle_planning.py — 最佳入针点搜索 + 针道近骨/穿骨检测
   logsetup.py    — 日志系统配置（滚动日志文件 + 控制台 + 崩溃捕获）
   mainwindow.py  — 主窗口 UI 和控制面板（组织选择/显示效果/消融针/仿真）
+  network_analyzer.py — 网络分析仪 TCP/SCPI 连接（端口 5025）
   presets.py     — 组织分层预设 + 体渲染传递函数合成
+  serial_connection.py — 主机串口连接
   style.py       — 深色/浅色主题样式表（QSS）和调色板
   viewer.py      — VTK 三维体渲染视图 + 三向正交切片视图
   assets/        — 存放主题所需的箭头图标等静态资源（PNG）

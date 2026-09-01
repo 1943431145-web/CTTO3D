@@ -1,7 +1,10 @@
 .venv/
+.applibs/
+.workbuddy/
 __pycache__/
 *.py[cod]
 *.pyo
+.pytest_cache/
 
 logs/
 *.log
@@ -12,3 +15,7 @@ __MACOSX/
 # Large local data/model assets should be stored with Git LFS or Releases.
 model/
 CT图像/
+CT_DATA/
+_nodule_tuning/
+tmp/
+_preview_*.png

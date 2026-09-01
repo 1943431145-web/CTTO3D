@@ -30,15 +30,12 @@ import sys
 # 本地库路径支持：当系统 pip 无法写入 site-packages 时，
 # 允许 PySide6 从项目目录下的 .applibs 文件夹加载
 # -----------------------------------------------------------
-_LOCAL_LIBS = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".applibs")
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+_LOCAL_LIBS = os.path.join(_ROOT, ".applibs")
 if os.path.isdir(_LOCAL_LIBS) and _LOCAL_LIBS not in sys.path:
     sys.path.insert(0, _LOCAL_LIBS)
 
 from PySide6 import QtWidgets
-import vtk
-
-from ctto3d.mainwindow import MainWindow
-from ctto3d import logsetup, style
 
 
 def main():
@@ -46,39 +43,53 @@ def main():
     应用程序主入口函数。
 
     执行流程：
-      1. 初始化日志系统（在创建 QApplication 之前，确保启动报错也能记录）
-      2. 关闭 VTK 的全局警告（避免控制台刷屏）
-      3. 创建 QApplication 实例
-      4. 加载用户上次选择的主题（默认深色），应用主题样式
-      5. 创建主窗口并最大化显示
-      6. 进入 Qt 事件循环（阻塞等待用户操作）
+      1. 初始化日志
+      2. 展示跟随当前主题的 HealthLink 品牌启动界面
+      3. 加载主题与主窗口，一次性初始化 VTK 后再揭开
+      4. 进入事件循环
 
     若需修改启动行为：
+      - 启动界面：修改 ctto3d/startup.py
       - 默认主题：参见 style.py 中的 DEFAULT_THEME 变量
       - 窗口标题：修改 app.setApplicationName() 和 MainWindow 的 setWindowTitle()
-      - 窗口初始大小：修改 MainWindow.__init__ 中的 self.resize(w, h)
+      - 启动显示模式：修改下方 window.showFullScreen()
     """
-    # 日志最先初始化，确保 Qt 消息和启动期间的崩溃都能被捕获
+    from ctto3d import logsetup
     logsetup.setup_logging()
-    # 屏蔽 VTK 全局警告（避免控制台输出大量底层库警告）
-    vtk.vtkObject.GlobalWarningDisplayOff()
 
-    # 创建 Qt 应用程序对象
     app = QtWidgets.QApplication(sys.argv)
-    app.setApplicationName("消融手术规划系统")
+    app.setApplicationName("HealthLink 消融手术规划系统")
+    app.setApplicationDisplayName("HealthLink 消融手术规划系统")
+    app.setOrganizationName("苏州海思临科医学科技有限公司")
 
-    # 加载用户记忆的主题（默认深色"dark"），可在运行时通过「视图→主题」菜单切换
-    # 如需修改默认主题为浅色，将 style.py 中的 DEFAULT_THEME 改为 "light"
+    from ctto3d import style
+    from ctto3d.startup import show_startup_cover
+
     theme = style.load_theme()
     style.apply_theme(app, theme)
+    cover = show_startup_cover(app, theme)
+    cover.set_status("正在加载三维医学影像引擎…", 22)
 
-    # 创建主窗口，最大化显示（保留标题栏和系统控件）
+    import vtk
+    vtk.vtkObject.GlobalWarningDisplayOff()
+    from ctto3d.mainwindow import MainWindow
+
+    cover.set_status("正在创建临床规划工作区…", 52)
     window = MainWindow()
-    window.showMaximized()
-    logging.getLogger("ctto3d").info("应用已启动(主题=%s)", theme)
+    # VTK 必须在窗口映射后才能初始化；先让整个主窗口完全透明，
+    # 避免居中启动页四周提前露出正在分块绘制的界面。
+    window.setWindowOpacity(0.0)
+    window.showFullScreen()
+    cover.set_status("正在渲染三维视图与切片…", 76)
+    window.prepare_first_frame()
+    cover.set_status("准备完成", 100)
 
-    # 进入 Qt 事件主循环，程序在此阻塞直到用户关闭窗口
-    # sys.exit 确保返回码正确传递给操作系统
+    # 主窗口首帧已经完整合成，可以安全地协调淡入主界面并淡出启动卡片。
+    cover.finish(window)
+    window.raise_()
+    window.activateWindow()
+
+    logging.getLogger("ctto3d").info("应用已启动(主题=%s)", theme)
     sys.exit(app.exec())
 
 

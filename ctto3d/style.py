@@ -64,8 +64,8 @@
     QSlider::groove  — 轨道颜色
     QSlider::sub-page — 已填充部分的颜色（accent 色）
     QSlider::handle  — 把手的边框和背景色
-  窗宽窗位滑块（WindowLevelSlider）有独立的配色方案，
-  其样式在 QSS 中以 #WindowLevelSlider 选择器定义
+  切片导航滑块（SliceNavSlider）有独立的配色方案，
+  其样式在 QSS 中以 #SliceNavSlider 选择器定义
 ============================================================
 """
 
@@ -110,11 +110,11 @@ DARK = {
     # 滚动条
     "SCROLL_HANDLE": "#2E2E2E",        # 滚动条滑块
     "SCROLL_HANDLE_HOVER": "#3A3A3A",  # 滚动条滑块悬停
-    # 滑块把手
-    "HANDLE": "#000000",               # 滑块把手填充色
-    # 窗宽窗位滑块专用配色
-    "WL_ACCENT": "#2563EB",            # 窗宽窗位滑块强调色（蓝色）
-    "WL_TRACK": "#2A2F36",             # 窗宽窗位滑块轨道色
+    # 滑块把手：深色主题用浅色实心圆，避免叠在强调色轨道上只剩一圈边框
+    "HANDLE": "#F3F6F8",
+    # 切片导航滑块专用配色
+    "WL_ACCENT": "#2563EB",            # 切片滑块强调色（蓝色）
+    "WL_TRACK": "#2A2F36",             # 切片滑块轨道色
     # 元信息
     "scheme": "dark",
 }
@@ -151,7 +151,7 @@ LIGHT = {
     "SCROLL_HANDLE_HOVER": "#AAB2BB",
     # 滑块把手
     "HANDLE": "#FFFFFF",              # 白色把手
-    # 窗宽窗位滑块专用配色
+    # 切片导航滑块专用配色
     "WL_ACCENT": "#2563EB",
     "WL_TRACK": "#CDD3D9",
     # 元信息
@@ -197,6 +197,83 @@ def _base_stylesheet(c):
     PRIMARY_DISABLED_BG = c["PRIMARY_DISABLED_BG"]; PRIMARY_DISABLED_TEXT = c["PRIMARY_DISABLED_TEXT"]
     SCROLL_HANDLE = c["SCROLL_HANDLE"]; SCROLL_HANDLE_HOVER = c["SCROLL_HANDLE_HOVER"]
     HANDLE = c["HANDLE"]; WL_ACCENT = c["WL_ACCENT"]; WL_TRACK = c["WL_TRACK"]
+    # 微波消融面板的通道强调色（浅色主题用更深的同系色保证可读性）
+    # 旁温=青绿（水冷）/ 杆温=琥珀（发热）/ 时间=天蓝 / 功率=黄，红色专属报警
+    if c["scheme"] == "dark":
+        MWA_TEMP = "#2DD4BF"; MWA_ROD = "#FBBF24"
+        MWA_TIME = "#38BDF8"; MWA_POWER = "#FACC15"
+        MWA_OK = "#4ADE80"; MWA_ALARM = "#F87171"
+        # 深海军蓝仪器面板：弹窗卡/通道卡/控件面各自的渐变与描边
+        MWA_CARD_BG = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+                       "stop:0 #111A28, stop:1 #0B111C)")
+        MWA_CARD_BORDER = "#26344A"
+        MWA_CH_BG = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+                     "stop:0 #17212F, stop:1 #121A26)")
+        MWA_CH_BORDER = "#2A3850"
+        MWA_SURFACE = "#1D2939"; MWA_SURFACE_BORDER = "#31415C"
+        MWA_SURFACE_HOVER = "#253449"
+        MWA_DIVIDER = "#26344A"
+        # 设备连接面板与消融仪共用同一套海军蓝仪器材质。
+        LINK_CARD_BG = MWA_CARD_BG
+        LINK_CARD_BORDER = MWA_CARD_BORDER
+        LINK_SECTION_BG = MWA_CH_BG
+        LINK_SECTION_BORDER = MWA_CH_BORDER
+        LINK_ROW_ON_BG = "rgba(74, 222, 128, 12)"
+        LINK_SELECTED_BG = MWA_SURFACE_HOVER
+        LINK_FIELD_BG = MWA_SURFACE
+        LINK_FIELD_BORDER = MWA_SURFACE_BORDER
+        LINK_FIELD_OFF_BG = "#111A26"
+        LINK_INPUT_BG = "#0A101A"
+        LINK_DIVIDER = MWA_DIVIDER
+        LINK_GHOST_HOVER = MWA_SURFACE_HOVER
+        LINK_LOG_BG = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+                       "stop:0 #0A101A, stop:1 #04070D)")
+        LINK_LOG_BORDER = "#263248"
+        LINK_LOG_TEXT = "#C6D2DB"
+        LINK_OK = "#4ADE80"
+        LINK_DANGER = "#F87171"
+        LINK_DANGER_BORDER = "rgba(248, 113, 113, 120)"
+        LINK_DANGER_HOVER = "rgba(248, 113, 113, 26)"
+        LINK_ACCENT_BORDER = "rgba(14, 159, 155, 150)"
+        LINK_TAG_BG = "rgba(255, 255, 255, 16)"
+        LINK_TAG_TEXT = "#8B95A0"
+    else:
+        MWA_TEMP = "#0F766E"; MWA_ROD = "#B45309"
+        MWA_TIME = "#0369A1"; MWA_POWER = "#A16207"
+        MWA_OK = "#15803D"; MWA_ALARM = "#DC2626"
+        MWA_CARD_BG = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+                       "stop:0 #FFFFFF, stop:1 #F4F7FA)")
+        MWA_CARD_BORDER = "#DCE3EB"
+        MWA_CH_BG = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+                     "stop:0 #FBFCFE, stop:1 #F1F5F9)")
+        MWA_CH_BORDER = "#DEE5ED"
+        MWA_SURFACE = "#EDF1F6"; MWA_SURFACE_BORDER = "#D7DFE9"
+        MWA_SURFACE_HOVER = "#E2E9F0"
+        MWA_DIVIDER = "#E3E9F0"
+        # 浅色主题同样复用消融仪的卡面、控件面与描边。
+        LINK_CARD_BG = MWA_CARD_BG
+        LINK_CARD_BORDER = MWA_CARD_BORDER
+        LINK_SECTION_BG = MWA_CH_BG
+        LINK_SECTION_BORDER = MWA_CH_BORDER
+        LINK_ROW_ON_BG = "rgba(21, 128, 61, 10)"
+        LINK_SELECTED_BG = MWA_SURFACE_HOVER
+        LINK_FIELD_BG = MWA_SURFACE
+        LINK_FIELD_BORDER = MWA_SURFACE_BORDER
+        LINK_FIELD_OFF_BG = "#E7EDF3"
+        LINK_INPUT_BG = "#F7FAFC"
+        LINK_DIVIDER = MWA_DIVIDER
+        LINK_GHOST_HOVER = MWA_SURFACE_HOVER
+        LINK_LOG_BG = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+                       "stop:0 #0A101A, stop:1 #04070D)")
+        LINK_LOG_BORDER = "#263248"
+        LINK_LOG_TEXT = "#C6D2DB"
+        LINK_OK = "#15803D"
+        LINK_DANGER = "#DC2626"
+        LINK_DANGER_BORDER = "rgba(220, 38, 38, 110)"
+        LINK_DANGER_HOVER = "rgba(220, 38, 38, 22)"
+        LINK_ACCENT_BORDER = "rgba(14, 159, 155, 150)"
+        LINK_TAG_BG = "rgba(28, 35, 41, 12)"
+        LINK_TAG_TEXT = "#5E6772"
     return f"""
 * {{
     font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
@@ -212,8 +289,27 @@ QFrame#Header {{
     background: {BG};
     border-bottom: 1px solid {BORDER};
 }}
+QLabel#HeaderLogo {{
+    background: transparent;
+    border: none;
+}}
 QFrame#HeaderAccent {{ background: {ACCENT}; border-radius: 3px; }}
 QFrame#HeaderDivider {{ background: {BORDER}; }}
+QPushButton#HeaderExit, QPushButton#HeaderMwa, QPushButton#HeaderTool, QToolButton#HeaderTool {{
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 0px;
+    margin: 0px;
+    text-align: center;
+}}
+QPushButton#HeaderTool:hover, QToolButton#HeaderTool:hover {{ background: {SURFACE_HOVER}; }}
+QPushButton#HeaderTool:pressed, QToolButton#HeaderTool:pressed {{ background: {PRESSED}; }}
+QToolButton#HeaderTool::menu-indicator {{ image: none; width: 0; height: 0; }}
+QPushButton#HeaderMwa:hover {{ background: rgba(245, 158, 11, 38); }}
+QPushButton#HeaderMwa:pressed {{ background: rgba(245, 158, 11, 68); }}
+QPushButton#HeaderExit:hover {{ background: rgba(251, 113, 133, 38); }}
+QPushButton#HeaderExit:pressed {{ background: rgba(251, 113, 133, 68); }}
 QLabel#Title {{
     font-size: 13pt;
     font-weight: 700;
@@ -224,21 +320,259 @@ QLabel#Subtitle {{
     color: {MUTED};
 }}
 
+
+/* 退出确认 / 消融控制 / 串口连接等居中毛玻璃弹层 */
+QWidget#ExitConfirmOverlay, QWidget#PlanningAlertOverlay,
+QWidget#MwaControlOverlay, QWidget#SerialControlOverlay {{ background: #0F172A; }}
+QFrame#ExitDialogCard {{
+    background: {PANEL};
+    border: 1px solid {BORDER};
+    border-radius: 16px;
+}}
+QFrame#MwaDialogCard {{
+    background: {PANEL};
+    border: 1px solid {BORDER};
+    border-radius: 16px;
+}}
+/* 设备连接弹窗与消融仪共用一套设计系统：链路通道卡复用 MwaChannel /
+   MwaIconChip 等组件（kind 取 ser1/ser2/vna），其余 Link* 规则见本文件
+   末尾「设备连接面板」一节。 */
+QScrollArea#SerialDialogScroll {{
+    background: transparent;
+    border: none;
+}}
+QScrollArea#SerialDialogScroll > QWidget > QWidget {{
+    background: transparent;
+}}
+QLabel#ExitDialogTitle {{
+    color: {TEXT};
+    font-size: 16pt;
+    font-weight: 700;
+}}
+QLabel#MwaDialogTitle {{
+    color: {TEXT};
+    font-size: 17pt;
+    font-weight: 700;
+}}
+QPushButton#OverlayCollapse {{
+    background: {SURFACE};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 4px 14px;
+    font-weight: 600;
+    font-size: 11.5pt;
+    text-align: center;
+}}
+QPushButton#OverlayCollapse:hover {{
+    background: {SURFACE_HOVER};
+    border-color: {ACCENT};
+}}
+QLabel#ExitDialogQuestion {{
+    color: {MUTED};
+    font-size: 11pt;
+}}
+QPushButton#ExitConfirm, QPushButton#ExitCancel {{
+    text-align: center;
+    border-radius: 8px;
+    padding: 8px 18px;
+    font-weight: 600;
+}}
+QPushButton#ExitConfirm {{
+    background: {ACCENT};
+    color: white;
+    border: 1px solid {ACCENT};
+}}
+QPushButton#ExitCancel {{
+    background: {SURFACE};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+}}
+
+/* 内嵌导入浏览器：固定覆盖内容区，所有元素跟随应用主题。 */
+QWidget#EmbeddedFileDialogOverlay {{
+    background: transparent;
+}}
+QFrame#EmbeddedFileDialogCard {{
+    background: {PANEL};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
+QLabel#EmbeddedFileDialogTitle {{
+    color: {TEXT};
+    font-size: 15pt;
+    font-weight: 700;
+    padding-left: 4px;
+}}
+QPushButton#EmbeddedFileDialogClose {{
+    background: transparent;
+    color: {MUTED};
+    border: none;
+    border-radius: 6px;
+    padding: 0;
+    font-size: 18pt;
+    font-weight: 400;
+    /* 覆盖全局 QPushButton 的 text-align:left，否则 × 贴边而按下高亮框居中 */
+    text-align: center;
+}}
+QPushButton#EmbeddedFileDialogClose:pressed {{
+    background: {PRESSED};
+    color: {TEXT};
+}}
+QLabel#RestrictedFileType {{
+    color: {MUTED};
+    background: transparent;
+    font-weight: 600;
+}}
+QLineEdit#RestrictedCurrentPath,
+QLineEdit#RestrictedSelectionPath {{
+    background: {BG};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 6px 9px;
+}}
+QFrame#RestrictedBrowserToolbar {{
+    background: {BG};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+QToolButton#RestrictedNavButton {{
+    background: {SURFACE};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 0;
+}}
+QToolButton#RestrictedNavButton:pressed {{
+    background: {PRESSED};
+    border-color: {ACCENT};
+}}
+QToolButton#RestrictedNavButton:disabled {{
+    background: {INPUT_DISABLED_BG};
+    color: {DISABLED};
+    border-color: {INPUT_DISABLED_BORDER};
+}}
+QTreeView#RestrictedFileView {{
+    background: {SURFACE};
+    alternate-background-color: {BG};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    outline: none;
+    selection-background-color: {ACCENT};
+    selection-color: white;
+}}
+QTreeView#RestrictedFileView::item {{
+    min-height: 28px;
+    padding: 2px 5px;
+}}
+QTreeView#RestrictedFileView QHeaderView::section {{
+    background: {BG};
+    color: {MUTED};
+    border: none;
+    border-right: 1px solid {BORDER};
+    border-bottom: 1px solid {BORDER};
+    padding: 6px 8px;
+    font-weight: 600;
+}}
+QFrame#RestrictedEmptyState {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+QLabel#RestrictedEmptyTitle {{
+    color: {TEXT};
+    background: transparent;
+    border: none;
+    font-size: 13pt;
+    font-weight: 700;
+}}
+QLabel#RestrictedEmptyDetail {{
+    color: {MUTED};
+    background: transparent;
+    border: none;
+    font-size: 9.5pt;
+}}
+QPushButton#EmbeddedFileDialogAccept {{
+    background: {ACCENT};
+    color: white;
+    border: 1px solid {ACCENT};
+    border-radius: 7px;
+    padding: 0;
+    text-align: center;
+    font-weight: 600;
+}}
+QPushButton#EmbeddedFileDialogCancel {{
+    background: {SURFACE};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 7px;
+    padding: 0;
+    text-align: center;
+    font-weight: 600;
+}}
 /* Side panel */
 QFrame#Panel {{
     background: {PANEL};
     border-right: 1px solid {BORDER};
 }}
+QFrame#RightPanel {{
+    background: {PANEL};
+    border-left: 1px solid {BORDER};
+}}
 QLabel#SectionTitle {{
-    font-size: 8pt;
+    font-size: 11pt;
     font-weight: 700;
-    color: {MUTED};
-    text-transform: uppercase;
-    letter-spacing: 1px;
+    color: #2563EB;
+    padding-top: 4px;
+    padding-bottom: 2px;
 }}
 QLabel#Status {{
     color: {MUTED};
     font-size: 9pt;
+}}
+
+/* 左侧影像数据暂存区：导入后由用户确认，才加载到中央视图。 */
+QFrame#DatasetLibraryCard {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 9px;
+}}
+QLabel#DatasetCount {{
+    color: {MUTED};
+    background: transparent;
+    font-size: 9pt;
+    font-weight: 600;
+}}
+QLabel#DatasetInfo {{
+    color: {MUTED};
+    background: transparent;
+    border: none;
+    font-size: 8.5pt;
+}}
+QListWidget#DatasetList {{
+    background: {BG};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    outline: none;
+    padding: 2px;
+}}
+QListWidget#DatasetList::item {{
+    color: {TEXT};
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid {BORDER};
+    border-radius: 4px;
+    padding: 5px 6px;
+}}
+QListWidget#DatasetList::item:hover {{
+    background: transparent;
+}}
+QListWidget#DatasetList::item:selected {{
+    background: {ACCENT};
+    color: white;
 }}
 
 /* Buttons */
@@ -249,7 +583,6 @@ QPushButton {{
     padding: 9px 12px;
     text-align: left;
 }}
-QPushButton:hover {{ border-color: {ACCENT}; background: {SURFACE_HOVER}; }}
 QPushButton:pressed {{ background: {PRESSED}; }}
 QPushButton:disabled {{ color: {DISABLED}; background: {INPUT_DISABLED_BG}; border-color: {INPUT_DISABLED_BORDER}; }}
 
@@ -260,8 +593,36 @@ QPushButton#Primary {{
     font-weight: 600;
     text-align: center;
 }}
-QPushButton#Primary:hover {{ background: {ACCENT_DARK}; }}
 QPushButton#Primary:disabled {{ background: {PRIMARY_DISABLED_BG}; color: {PRIMARY_DISABLED_TEXT}; }}
+
+/* 影像数据：移除按钮，红色文字提示危险操作 */
+QPushButton#DatasetRemove {{
+    color: #EF4444;
+    font-weight: 600;
+    text-align: center;
+}}
+QPushButton#DatasetRemove:disabled {{
+    color: {DISABLED};
+}}
+
+/* 顶部串口弹出面板使用紧凑按钮，避免套用侧栏的大尺寸按钮。 */
+QPushButton#Compact {{
+    padding: 5px 10px;
+    text-align: center;
+    border-radius: 6px;
+}}
+QPushButton#PrimaryCompact {{
+    background: {ACCENT};
+    color: white;
+    border: none;
+    padding: 6px 12px;
+    font-weight: 600;
+    text-align: center;
+    border-radius: 6px;
+}}
+QPushButton#PrimaryCompact:disabled {{
+    background: {PRIMARY_DISABLED_BG}; color: {PRIMARY_DISABLED_TEXT};
+}}
 
 /* Segmented toggles (不透明/透明, 显示针, ...) */
 QPushButton#Segment {{
@@ -322,7 +683,7 @@ QFrame#SliceView[active="true"] {{
     border: 1px solid #E3B341;
     border-radius: 0px;
 }}
-/* 中间 3D 视图：常驻深灰外框（未导入 CT 时也显示，作为布局骨架），单击选中时金色外框 */
+/* 中间 3D 视图：常驻深灰外框；仅已加载 CT 且选中时才显示金色外框 */
 QFrame#View3DFrame {{
     border: 1px solid #3A3A3A;
     border-radius: 0px;
@@ -343,9 +704,13 @@ QLabel#SliceTitle {{
     font-size: 12px;
     font-weight: 600;
 }}
-/* 放大切片浮层：作为当前焦点视图，外框用金色 */
+/* 放大切片浮层：有体数据且作为焦点时才用金色外框 */
 QFrame#ExpandedSliceOverlay {{
     background: {BG};
+    border: 1px solid #3A3A3A;
+    border-radius: 0px;
+}}
+QFrame#ExpandedSliceOverlay[active="true"] {{
     border: 1px solid #E3B341;
     border-radius: 0px;
 }}
@@ -364,51 +729,73 @@ QPushButton#OverlayClose {{
     border-radius: 6px;
 }}
 
-/* Slider */
+/* Slider — 左右留白，把手完整显示为实心圆 */
+QSlider {{
+    min-height: 24px;
+    padding: 0 11px;
+}}
+QSlider:vertical {{
+    min-width: 24px;
+    padding: 11px 0;
+}}
 QSlider::groove:horizontal {{
-    height: 5px; background: {BORDER}; border-radius: 3px;
+    height: 8px;
+    background: {BORDER};
+    border-radius: 4px;
 }}
 QSlider::sub-page:horizontal {{
-    background: {ACCENT}; border-radius: 3px;
+    background: {ACCENT};
+    border-radius: 4px;
+}}
+QSlider::add-page:horizontal {{
+    background: {BORDER};
+    border-radius: 4px;
 }}
 QSlider::handle:horizontal {{
-    background: {HANDLE}; border: 2px solid {ACCENT};
-    width: 15px; height: 15px; margin: -6px 0; border-radius: 9px;
+    background: {HANDLE};
+    border: 2px solid {ACCENT};
+    width: 16px;
+    height: 16px;
+    margin: -6px 0;
+    border-radius: 10px;
+}}
+QSlider::groove:vertical {{
+    width: 8px;
+    background: {BORDER};
+    border-radius: 4px;
+}}
+QSlider::add-page:vertical {{
+    background: {ACCENT};
+    border-radius: 4px;
+}}
+QSlider::sub-page:vertical {{
+    background: {BORDER};
+    border-radius: 4px;
+}}
+QSlider::handle:vertical {{
+    background: {HANDLE};
+    border: 2px solid {ACCENT};
+    width: 16px;
+    height: 16px;
+    margin: 0 -6px;
+    border-radius: 10px;
 }}
 
-QSlider#WindowLevelSlider::groove:horizontal {{
-    height: 7px; background: {WL_TRACK}; border-radius: 4px;
+QSlider#SliceNavSlider {{
+    padding: 0 11px;
 }}
-QSlider#WindowLevelSlider::sub-page:horizontal {{
-    background: {WL_ACCENT}; border-radius: 4px;
-}}
-QSlider#WindowLevelSlider::handle:horizontal {{
-    background: {HANDLE}; border: 2px solid {WL_ACCENT};
-    width: 16px; height: 16px; margin: -6px 0; border-radius: 9px;
-}}
-QSlider#WindowLevelSlider::groove:vertical {{
-    width: 7px; background: {WL_TRACK}; border-radius: 4px;
-}}
-QSlider#WindowLevelSlider::add-page:vertical {{
-    background: {WL_ACCENT}; border-radius: 4px;
-}}
-QSlider#WindowLevelSlider::sub-page:vertical {{
-    background: {WL_TRACK}; border-radius: 4px;
-}}
-QSlider#WindowLevelSlider::handle:vertical {{
-    background: {HANDLE}; border: 2px solid {WL_ACCENT};
-    width: 16px; height: 16px; margin: 0 -6px; border-radius: 9px;
-}}
-
 QSlider#SliceNavSlider::groove:horizontal {{
-    height: 5px; background: {WL_TRACK}; border-radius: 3px;
+    height: 8px; background: {WL_TRACK}; border-radius: 4px;
 }}
 QSlider#SliceNavSlider::sub-page:horizontal {{
-    background: {ACCENT}; border-radius: 3px;
+    background: {ACCENT}; border-radius: 4px;
+}}
+QSlider#SliceNavSlider::add-page:horizontal {{
+    background: {WL_TRACK}; border-radius: 4px;
 }}
 QSlider#SliceNavSlider::handle:horizontal {{
     background: {HANDLE}; border: 2px solid {ACCENT};
-    width: 14px; height: 14px; margin: -5px 0; border-radius: 8px;
+    width: 16px; height: 16px; margin: -6px 0; border-radius: 10px;
 }}
 
 QCheckBox {{ spacing: 8px; }}
@@ -446,12 +833,553 @@ QMenuBar::item {{
 QMenuBar::item:selected {{ background: {SURFACE_HOVER}; }}
 QMenuBar::item:pressed {{ background: {PRESSED}; color: {TEXT}; }}
 
+/* 顶部串口菜单内嵌的小型通信面板。 */
+QLabel#SerialTitle {{ font-size: 11pt; font-weight: 700; color: {TEXT}; }}
+QLabel#SerialSection {{ font-size: 9pt; font-weight: 600; color: {MUTED}; }}
+QLabel#SerialStatusDot {{ background: #64748B; border-radius: 4px; }}
+QLabel#SerialStatusDot[connected="true"] {{ background: #22C55E; }}
+QFrame#SerialSeparator {{ background: {BORDER}; border: none; max-height: 1px; }}
+/* 收发日志：底板见 QFrame#LinkLogHolder，这里只管文字。
+   等宽字体 + 跟随主题的前景色（浅色主题下不再是一块黑板）。 */
+QPlainTextEdit#SerialRxLog {{
+    background: transparent;
+    color: #C9D6E8;
+    border: none;
+    border-radius: 0px;
+    padding: 2px 4px;
+    font-family: "Consolas", "Cascadia Mono", "Microsoft YaHei UI", monospace;
+    font-size: 9pt;
+    selection-background-color: {ACCENT};
+    selection-color: white;
+}}
+/* ---- 微波消融仪：深海军蓝仪器面板 + 四通道深色屏显。 ---- */
+QFrame#MwaDialogCard {{
+    background: {MWA_CARD_BG};
+    border: 1px solid {MWA_CARD_BORDER};
+    border-radius: 18px;
+}}
+QFrame#MwaTitleAccent {{
+    background: {ACCENT};
+    border-radius: 2px;
+}}
+QLabel#MwaDialogSubtitle {{
+    color: {MUTED};
+    font-size: 8pt;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+}}
+QPushButton#OverlayCollapse {{
+    background: {MWA_SURFACE};
+    color: {TEXT};
+    border: 1px solid {MWA_SURFACE_BORDER};
+    border-radius: 8px;
+    padding: 4px 14px;
+    font-weight: 600;
+    font-size: 11.5pt;
+    text-align: center;
+}}
+QPushButton#OverlayCollapse:hover {{
+    background: {MWA_SURFACE_HOVER};
+    border-color: {ACCENT};
+}}
+QFrame#MwaDeviceScreen {{
+    background: transparent;
+    border: none;
+}}
+QFrame#MwaStatusChip {{
+    background: {MWA_SURFACE};
+    border: 1px solid {MWA_SURFACE_BORDER};
+    border-radius: 14px;
+}}
+QFrame#MwaStatusChip[online="true"] {{
+    background: rgba(34, 197, 94, 22);
+    border-color: rgba(34, 197, 94, 90);
+}}
+QLabel#MwaLink {{
+    color: {MUTED};
+    font-size: 10.5pt;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+}}
+QLabel#MwaLink[online="true"] {{
+    color: #22C55E;
+}}
+QFrame#MwaChannel {{
+    background: {MWA_CH_BG};
+    border: 1px solid {MWA_CH_BORDER};
+    border-radius: 14px;
+}}
+QFrame#MwaChannelHeader,
+QFrame#MwaChannelFooter,
+QFrame#MwaFooterLine,
+QFrame#MwaStepGroup {{
+    background: transparent;
+    border: none;
+}}
+QFrame#MwaSectionDivider {{
+    background: {MWA_DIVIDER};
+    border: none;
+}}
+/* 通道图标徽章：每通道一个低饱和度的彩色底 */
+QFrame#MwaIconChip {{
+    border: none;
+    border-radius: 9px;
+}}
+QFrame#MwaIconChip[kind="temp"]  {{ background: rgba(45, 212, 191, 34); }}
+QFrame#MwaIconChip[kind="rod"]   {{ background: rgba(251, 191, 36, 34); }}
+QFrame#MwaIconChip[kind="time"]  {{ background: rgba(56, 189, 248, 34); }}
+QFrame#MwaIconChip[kind="power"] {{ background: rgba(250, 204, 21, 34); }}
+/* 设备连接面板的链路通道卡复用同一套通道色：ser1=青绿 ser2=天蓝 vna=琥珀 */
+QFrame#MwaIconChip[kind="ser1"] {{ background: rgba(45, 212, 191, 34); }}
+QFrame#MwaIconChip[kind="ser2"] {{ background: rgba(56, 189, 248, 34); }}
+QFrame#MwaIconChip[kind="vna"] {{ background: rgba(251, 191, 36, 34); }}
+QFrame#MwaChannel[kind="ser1"][connected="true"] {{ border-color: rgba(45, 212, 191, 120); }}
+QFrame#MwaChannel[kind="ser2"][connected="true"] {{ border-color: rgba(56, 189, 248, 120); }}
+QFrame#MwaChannel[kind="vna"][connected="true"] {{ border-color: rgba(251, 191, 36, 120); }}
+QLabel#MwaChannelTitle {{
+    color: {TEXT};
+    font-size: 12pt;
+    font-weight: 700;
+    background: transparent;
+    border: none;
+}}
+QLabel#MwaUnitBadge {{
+    font-size: 8.5pt;
+    font-weight: 700;
+    border-radius: 9px;
+    padding: 2px 9px;
+    background: transparent;
+    border: none;
+}}
+QLabel#MwaUnitBadge[kind="temp"]  {{ color: {MWA_TEMP};  background: rgba(45, 212, 191, 22); }}
+QLabel#MwaUnitBadge[kind="rod"]   {{ color: {MWA_ROD};   background: rgba(251, 191, 36, 22); }}
+QLabel#MwaUnitBadge[kind="time"]  {{ color: {MWA_TIME};  background: rgba(56, 189, 248, 22); }}
+QLabel#MwaUnitBadge[kind="power"] {{ color: {MWA_POWER}; background: rgba(250, 204, 21, 22); }}
+QLabel#MwaUnitBadge[kind="ser1"] {{ color: {MWA_TEMP}; background: rgba(45, 212, 191, 22); }}
+QLabel#MwaUnitBadge[kind="ser2"] {{ color: {MWA_TIME}; background: rgba(56, 189, 248, 22); }}
+QLabel#MwaUnitBadge[kind="vna"] {{ color: {MWA_ROD};  background: rgba(251, 191, 36, 22); }}
+/* 屏显插槽：两种主题都保持深色玻璃质感，底边一条通道色 LED 灯带 */
+QFrame#MwaValueHolder {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #0A101A, stop:1 #04070D);
+    border: 1px solid #263248;
+    border-bottom: 2px solid #31405C;
+    border-radius: 10px;
+}}
+QFrame#MwaValueHolder[kind="temp"]  {{ border-bottom-color: rgba(45, 212, 191, 150); }}
+QFrame#MwaValueHolder[kind="rod"]   {{ border-bottom-color: rgba(251, 191, 36, 150); }}
+QFrame#MwaValueHolder[kind="time"]  {{ border-bottom-color: rgba(56, 189, 248, 150); }}
+QFrame#MwaValueHolder[kind="power"] {{ border-bottom-color: rgba(250, 204, 21, 150); }}
+QFrame#MwaValueHolder[alarm="true"] {{ border-bottom-color: rgba(248, 113, 113, 190); }}
+/* 监护仪风格大号读数：深色屏上按通道着色，报警时转红 */
+QLabel#MwaValue {{
+    font-family: "Bahnschrift", "Segoe UI Variable Display", "Segoe UI";
+    font-size: 46pt;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+}}
+QLabel#MwaValue[compact="true"] {{
+    font-size: 27pt;
+}}
+QLabel#MwaValue[kind="temp"]  {{ color: #2DD4BF; }}
+QLabel#MwaValue[kind="rod"]   {{ color: #FBBF24; }}
+QLabel#MwaValue[kind="time"]  {{ color: #38BDF8; }}
+QLabel#MwaValue[kind="power"] {{ color: #FACC15; }}
+QLabel#MwaValue[alarm="true"] {{ color: #F87171; }}
+QLabel#MwaFooterLabel {{
+    color: {MUTED};
+    font-size: 8.5pt;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+}}
+QLabel#MwaFooterValue {{
+    color: {TEXT};
+    font-size: 11pt;
+    font-weight: 700;
+    background: transparent;
+    border: none;
+}}
+/* 通道状态胶囊：正常绿 / 报警红 */
+QLabel#MwaState {{
+    color: {MWA_OK};
+    background: rgba(34, 197, 94, 26);
+    border: 1px solid rgba(34, 197, 94, 64);
+    border-radius: 10px;
+    padding: 2px 10px;
+    font-size: 8.5pt;
+    font-weight: 700;
+}}
+QLabel#MwaState[alarm="true"] {{
+    color: {MWA_ALARM};
+    background: rgba(239, 68, 68, 26);
+    border-color: rgba(239, 68, 68, 70);
+}}
+QPushButton#MwaStep {{
+    min-height: 40px;
+    border-radius: 10px;
+    padding: 0;
+    text-align: center;
+    font-family: "Segoe UI", "Microsoft YaHei UI";
+    font-weight: 600;
+    font-size: 15pt;
+    background: {MWA_SURFACE};
+    border: 1px solid {MWA_SURFACE_BORDER};
+    color: {TEXT};
+}}
+QPushButton#MwaStep:hover {{
+    background: {MWA_SURFACE_HOVER};
+    border-color: {ACCENT};
+    color: {ACCENT};
+}}
+QPushButton#MwaStep:pressed {{
+    background: {PRESSED};
+}}
+QPushButton#MwaStep:disabled {{
+    color: {DISABLED};
+    background: transparent;
+    border-color: {MWA_DIVIDER};
+}}
+
+/* 底部动作按钮：冷却=天蓝语义，微波=红色语义，激活态填充渐变 */
+QPushButton#MwaAction {{
+    min-height: 54px;
+    border-radius: 12px;
+    padding: 4px 16px;
+    font-size: 12.5pt;
+    font-weight: 700;
+    background: {MWA_SURFACE};
+    border: 1px solid {MWA_SURFACE_BORDER};
+    color: {TEXT};
+    text-align: center;
+}}
+QPushButton#MwaAction[kind="cool"] {{ border-color: rgba(56, 189, 248, 120); }}
+QPushButton#MwaAction[kind="cool"]:hover {{
+    background: rgba(56, 189, 248, 26);
+    border-color: #38BDF8;
+}}
+QPushButton#MwaAction[kind="cool"][active="true"] {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #0EA5E9, stop:1 #0470A8);
+    border: 1px solid #0EA5E9;
+    color: white;
+}}
+QPushButton#MwaAction[kind="mw"] {{ border-color: rgba(248, 113, 113, 120); }}
+QPushButton#MwaAction[kind="mw"]:hover {{
+    background: rgba(248, 113, 113, 26);
+    border-color: #F87171;
+}}
+QPushButton#MwaAction[kind="mw"][active="true"] {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #EF4444, stop:1 #B91C1C);
+    border: 1px solid #EF4444;
+    color: white;
+}}
+/* 设备连接：紧凑动作钮；连接=品牌色描边，断开=红色激活态 */
+QPushButton#MwaAction[compact="true"] {{
+    min-height: 40px;
+    font-size: 11pt;
+    border-radius: 10px;
+    padding: 2px 12px;
+}}
+QPushButton#MwaAction[kind="link"] {{
+    border-color: rgba(56, 189, 248, 120);
+}}
+QPushButton#MwaAction[kind="link"]:hover {{
+    background: rgba(56, 189, 248, 26);
+    border-color: #38BDF8;
+}}
+QPushButton#MwaAction[kind="link"][active="true"] {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #EF4444, stop:1 #B91C1C);
+    border: 1px solid #EF4444;
+    color: white;
+}}
+QPushButton#MwaAction:disabled {{
+    color: {DISABLED};
+    background: transparent;
+    border-color: {MWA_DIVIDER};
+}}
 /* Context menus (slice right-click) + top-menu dropdowns */
-QMenu {{ background: {SURFACE}; border: 1px solid {BORDER}; color: {TEXT}; padding: 4px; }}
-QMenu::item {{ padding: 6px 18px; border-radius: 4px; }}
+QMenu {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+    color: {TEXT};
+    padding: 6px;
+}}
+QMenu::item {{
+    padding: 7px 18px;
+    border-radius: 8px;
+    margin: 1px 2px;
+}}
 QMenu::item:selected {{ background: {ACCENT}; color: white; }}
 QMenu::item:disabled {{ color: {DISABLED}; }}
-QMenu::separator {{ height: 1px; background: {BORDER}; margin: 4px 8px; }}
+QMenu::separator {{ height: 1px; background: {BORDER}; margin: 5px 10px; }}
+QMenu::indicator {{ width: 14px; height: 14px; }}
+/* 切片窗宽窗位菜单：更紧凑，避免贴边溢出 */
+QMenu#SliceWindowLevelMenu {{
+    padding: 4px;
+    border-radius: 10px;
+    font-size: 9pt;
+}}
+QMenu#SliceWindowLevelMenu::item {{
+    padding: 4px 10px;
+    border-radius: 6px;
+    margin: 0px 1px;
+}}
+QMenu#SliceWindowLevelMenu::separator {{
+    height: 1px;
+    background: {BORDER};
+    margin: 3px 8px;
+}}
+QWidget#WindowLevelRow {{
+    background: transparent;
+}}
+/* ============================================================
+   设备连接面板 — 与微波消融仪共用海军蓝仪器设计系统
+   ============================================================ */
+QWidget#SerialPopup {{
+    background: transparent;
+    border-radius: 0px;
+}}
+QFrame#LinkDialogCard {{
+    background: {LINK_CARD_BG};
+    border: 1px solid {LINK_CARD_BORDER};
+    border-radius: 18px;
+}}
+QFrame#LinkTitleAccent {{
+    background: {ACCENT};
+    border-radius: 1px;
+}}
+QLabel#LinkDialogTitle {{
+    color: {TEXT};
+    font-size: 17pt;
+    font-weight: 700;
+    background: transparent;
+    border: none;
+}}
+QLabel#LinkDialogSubtitle {{
+    color: {MUTED};
+    font-size: 8pt;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+}}
+/* 标题右侧「x / 3 已连接」胶囊 */
+QFrame#LinkStatusChip {{
+    background: {LINK_FIELD_BG};
+    border: 1px solid {LINK_FIELD_BORDER};
+    border-radius: 13px;
+}}
+QFrame#LinkStatusChip[online="true"] {{
+    background: {LINK_FIELD_BG};
+    border-color: {LINK_FIELD_BORDER};
+}}
+QLabel#LinkSummary {{
+    color: {MUTED};
+    font-size: 9.5pt;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+}}
+QLabel#LinkSummary[online="true"] {{ color: {TEXT}; }}
+/* 两个分区容器：设备链路 / 串口监视 */
+QFrame#LinkSection, QFrame#LinkMonitor {{
+    background: {LINK_SECTION_BG};
+    border: 1px solid {LINK_SECTION_BORDER};
+    border-radius: 14px;
+}}
+QLabel#LinkSectionTitle {{
+    color: {TEXT};
+    font-size: 10.5pt;
+    font-weight: 700;
+    background: transparent;
+    border: none;
+}}
+QLabel#LinkSectionCaption {{
+    color: {MUTED};
+    font-size: 8pt;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+}}
+QLabel#LinkFieldLabel {{
+    color: {MUTED};
+    font-size: 8pt;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+}}
+/* 状态角标：「未连接」是待机不是报警，所以走灰阶，红色留给真正的故障 */
+QLabel#LinkState {{
+    color: {LINK_OK};
+    font-size: 8pt;
+    font-weight: 700;
+    background: rgba(34, 197, 94, 18);
+    border: 1px solid rgba(34, 197, 94, 65);
+    border-radius: 9px;
+    padding: 2px 7px;
+}}
+QLabel#LinkState[alarm="true"] {{
+    color: {MUTED};
+    background: {LINK_TAG_BG};
+    border-color: {LINK_FIELD_BORDER};
+}}
+QLabel#LinkStatus {{
+    color: {MUTED};
+    font-size: 8.5pt;
+    background: transparent;
+    border: none;
+}}
+QLabel#LinkStatus[connected="true"] {{ color: {TEXT}; }}
+/* 串口错误：红色只留给真正的故障（连接失败 / 资源丢失等） */
+QLabel#LinkStatus[error="true"] {{ color: {LINK_DANGER}; }}
+/* 链路通道卡 / 监视区内的输入控件 */
+QFrame#MwaChannel QComboBox, QFrame#MwaChannel QLineEdit,
+QFrame#LinkMonitor QLineEdit {{
+    background: {LINK_INPUT_BG};
+    border: 1px solid {LINK_FIELD_BORDER};
+    border-radius: 7px;
+    padding: 3px 8px;
+    min-height: 27px;
+    color: {TEXT};
+}}
+QFrame#MwaChannel QComboBox:hover, QFrame#MwaChannel QLineEdit:hover,
+QFrame#LinkMonitor QLineEdit:hover {{
+    border-color: {ACCENT};
+}}
+QFrame#MwaChannel QComboBox:disabled, QFrame#MwaChannel QLineEdit:disabled,
+QFrame#LinkMonitor QLineEdit:disabled {{
+    color: {DISABLED};
+    background: {LINK_FIELD_OFF_BG};
+    border-color: {LINK_DIVIDER};
+}}
+QFrame#LinkMonitor QCheckBox {{
+    color: {MUTED};
+    font-size: 9pt;
+    background: transparent;
+}}
+/* 次级动作：刷新端口 / 清空 */
+QPushButton#LinkGhost {{
+    background: transparent;
+    border: 1px solid {LINK_FIELD_BORDER};
+    border-radius: 7px;
+    padding: 2px 11px;
+    color: {MUTED};
+    font-size: 9pt;
+    font-weight: 600;
+    text-align: center;
+}}
+QPushButton#LinkGhost:hover {{
+    background: {LINK_GHOST_HOVER};
+    border-color: {LINK_FIELD_BORDER};
+    color: {TEXT};
+}}
+QPushButton#LinkGhost:disabled {{
+    color: {DISABLED};
+    border-color: {LINK_DIVIDER};
+}}
+/* 连接 / 断开：一律描边，不用实心渐变 —— 实心红在医疗界面里等同报警 */
+QPushButton#LinkAction {{
+    background: {MWA_SURFACE};
+    border: 1px solid {LINK_ACCENT_BORDER};
+    border-radius: 10px;
+    padding: 4px 10px;
+    color: {ACCENT};
+    font-size: 10pt;
+    font-weight: 700;
+    text-align: center;
+}}
+QPushButton#LinkAction:hover {{
+    background: {MWA_SURFACE_HOVER};
+    border-color: {ACCENT};
+}}
+QFrame#MwaChannel[kind="ser1"] QPushButton#LinkAction {{
+    color: {MWA_TEMP}; border-color: rgba(45, 212, 191, 120);
+}}
+QFrame#MwaChannel[kind="ser2"] QPushButton#LinkAction {{
+    color: {MWA_TIME}; border-color: rgba(56, 189, 248, 120);
+}}
+QFrame#MwaChannel[kind="vna"] QPushButton#LinkAction {{
+    color: {MWA_ROD}; border-color: rgba(251, 191, 36, 120);
+}}
+QFrame#MwaChannel QPushButton#LinkAction[active="true"] {{
+    background: transparent;
+    border-color: {LINK_FIELD_BORDER};
+    color: {TEXT};
+}}
+QFrame#MwaChannel QPushButton#LinkAction[active="true"]:hover {{
+    background: {LINK_DANGER_HOVER};
+    border-color: {LINK_DANGER};
+}}
+QPushButton#LinkAction:disabled {{
+    color: {DISABLED};
+    background: transparent;
+    border-color: {LINK_DIVIDER};
+}}
+/* 收发日志底板：与消融仪屏显同款的深色玻璃控制台（两种主题都保持深色） */
+QFrame#LinkLogHolder {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #0A101A, stop:1 #04070D);
+    border: 1px solid #263248;
+    border-bottom: 2px solid #31405C;
+    border-radius: 10px;
+}}
+/* RX 活动指示灯：收到数据时绿灯闪烁（active 由代码瞬时置位后复位） */
+QLabel#SerialRxLed {{
+    background: {LINK_FIELD_BORDER};
+    border-radius: 4px;
+}}
+QLabel#SerialRxLed[active="true"] {{
+    background: {LINK_OK};
+}}
+/* RX 接收计数徽章 */
+QLabel#SerialRxBadge {{
+    color: {MUTED};
+    font-size: 8pt;
+    font-weight: 600;
+    background: {LINK_FIELD_BG};
+    border: 1px solid {LINK_FIELD_BORDER};
+    border-radius: 9px;
+    padding: 1px 8px;
+}}
+/* TX 活动指示灯：发送数据时蓝色闪烁 */
+QLabel#SerialTxLed {{
+    background: {LINK_FIELD_BORDER};
+    border-radius: 4px;
+}}
+QLabel#SerialTxLed[active="true"] {{
+    background: #38BDF8;
+}}
+/* TX 发送计数徽章 */
+QLabel#SerialTxBadge {{
+    color: {MUTED};
+    font-size: 8pt;
+    font-weight: 600;
+    background: {LINK_FIELD_BG};
+    border: 1px solid {LINK_FIELD_BORDER};
+    border-radius: 9px;
+    padding: 1px 8px;
+}}
+/* 「收起」按钮在本弹层里改用中性灰，不跟着消融仪的海军蓝 */
+QWidget#SerialControlOverlay QPushButton#OverlayCollapse {{
+    background: {MWA_SURFACE};
+    color: {TEXT};
+    border: 1px solid {MWA_SURFACE_BORDER};
+    border-radius: 8px;
+    padding: 4px 14px;
+    font-size: 10.5pt;
+    font-weight: 600;
+}}
+QWidget#SerialControlOverlay QPushButton#OverlayCollapse:hover {{
+    background: {MWA_SURFACE_HOVER};
+    border-color: {ACCENT};
+    color: {ACCENT};
+}}
 
 QToolTip {{
     background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER};
@@ -533,7 +1461,9 @@ def ensure_arrow_assets(c):
         paths = {}
         for key, (direction, color) in spec.items():
             p = os.path.join(out_dir, "arrow_%s_%s.png" % (key, scheme))
-            _render_arrow_png(p, direction, color)
+            # 已有同名文件则复用，避免每次启动都重绘 PNG
+            if not os.path.isfile(p):
+                _render_arrow_png(p, direction, color)
             paths[key] = p.replace("\\", "/")
         return paths
     except Exception:
@@ -556,15 +1486,15 @@ def _input_stylesheet(c, arrows):
     SURFACE = c["SURFACE"]; SURFACE_HOVER = c["SURFACE_HOVER"]; BORDER = c["BORDER"]
     TEXT = c["TEXT"]; ACCENT = c["ACCENT"]; STEP_HOVER = c["STEP_HOVER"]
     return f"""
-/* Combo box + spin boxes (needle params, Z 比例, 功率/时间/倍率) */
-QComboBox, QDoubleSpinBox, QSpinBox {{
+/* Combo box + spin boxes + line edits (needle params, serial, Z 比例, 功率/时间/倍率) */
+QComboBox, QDoubleSpinBox, QSpinBox, QLineEdit {{
     background: {SURFACE};
     border: 1px solid {BORDER};
     border-radius: 6px;
     padding: 4px 8px;
     color: {TEXT};
 }}
-QComboBox:hover, QDoubleSpinBox:hover, QSpinBox:hover {{ border-color: {ACCENT}; }}
+QComboBox:hover, QDoubleSpinBox:hover, QSpinBox:hover, QLineEdit:hover {{ border-color: {ACCENT}; }}
 QComboBox QAbstractItemView {{
     background: {SURFACE};
     border: 1px solid {BORDER};
@@ -576,17 +1506,15 @@ QComboBox QAbstractItemView {{
 
 /* Up/down steppers — give them a visible button face and clear triangles */
 QDoubleSpinBox::up-button, QSpinBox::up-button {{
-    subcontrol-origin: border; subcontrol-position: top right;
+    subcontrol-origin: padding; subcontrol-position: top right;
     width: 18px; background: {SURFACE_HOVER};
     border-left: 1px solid {BORDER}; border-top-right-radius: 6px;
 }}
 QDoubleSpinBox::down-button, QSpinBox::down-button {{
-    subcontrol-origin: border; subcontrol-position: bottom right;
+    subcontrol-origin: padding; subcontrol-position: bottom right;
     width: 18px; background: {SURFACE_HOVER};
     border-left: 1px solid {BORDER}; border-bottom-right-radius: 6px;
 }}
-QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
-QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {{ background: {STEP_HOVER}; }}
 QDoubleSpinBox::up-button:pressed, QSpinBox::up-button:pressed,
 QDoubleSpinBox::down-button:pressed, QSpinBox::down-button:pressed {{ background: {ACCENT}; }}
 QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {{ image: url({arrows['up']}); width: 9px; height: 9px; }}
@@ -703,6 +1631,23 @@ def apply_theme(app, theme):
     # 重新生成箭头图标（颜色随主题变化）+ 应用样式表
     app.setStyleSheet(build_stylesheet(c, ensure_arrow_assets(c)))
     return c
+
+
+def style_rounded_menu(menu):
+    """让 QMenu 圆角在 Windows 上真正生效（含子菜单）。"""
+    from PySide6 import QtCore
+
+    if menu is None:
+        return
+    flags = (menu.windowFlags()
+             | QtCore.Qt.WindowType.FramelessWindowHint
+             | QtCore.Qt.WindowType.NoDropShadowWindowHint)
+    menu.setWindowFlags(flags)
+    menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    for action in menu.actions():
+        submenu = action.menu()
+        if submenu is not None:
+            style_rounded_menu(submenu)
 
 
 def _settings():
