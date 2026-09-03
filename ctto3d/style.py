@@ -112,6 +112,8 @@ DARK = {
     "SCROLL_HANDLE_HOVER": "#3A3A3A",  # 滚动条滑块悬停
     # 滑块把手：深色主题用浅色实心圆，避免叠在强调色轨道上只剩一圈边框
     "HANDLE": "#F3F6F8",
+    # 规划步骤条"当前步"金色：深色主题用亮金（黑底高对比）
+    "STEP_ACTIVE": "#E3B341",
     # 切片导航滑块专用配色
     "WL_ACCENT": "#2563EB",            # 切片滑块强调色（蓝色）
     "WL_TRACK": "#2A2F36",             # 切片滑块轨道色
@@ -151,6 +153,8 @@ LIGHT = {
     "SCROLL_HANDLE_HOVER": "#AAB2BB",
     # 滑块把手
     "HANDLE": "#FFFFFF",              # 白色把手
+    # 规划步骤条"当前步"金色：浅色主题用深金（白底高对比）
+    "STEP_ACTIVE": "#B7791F",
     # 切片导航滑块专用配色
     "WL_ACCENT": "#2563EB",
     "WL_TRACK": "#CDD3D9",
@@ -197,6 +201,7 @@ def _base_stylesheet(c):
     PRIMARY_DISABLED_BG = c["PRIMARY_DISABLED_BG"]; PRIMARY_DISABLED_TEXT = c["PRIMARY_DISABLED_TEXT"]
     SCROLL_HANDLE = c["SCROLL_HANDLE"]; SCROLL_HANDLE_HOVER = c["SCROLL_HANDLE_HOVER"]
     HANDLE = c["HANDLE"]; WL_ACCENT = c["WL_ACCENT"]; WL_TRACK = c["WL_TRACK"]
+    STEP_ACTIVE = c["STEP_ACTIVE"]
     # 微波消融面板的通道强调色（浅色主题用更深的同系色保证可读性）
     # 旁温=青绿（水冷）/ 杆温=琥珀（发热）/ 时间=天蓝 / 功率=黄，红色专属报警
     if c["scheme"] == "dark":
@@ -527,6 +532,93 @@ QLabel#SectionTitle {{
     color: #2563EB;
     padding-top: 4px;
     padding-bottom: 2px;
+}}
+/* ===== 消融规划主流程卡片：软件核心功能区的视觉强调 =====
+   （步骤条 + 结节定位 + 针道规划收进同一张品牌色描边卡片，
+   打开界面即可看出软件重点与先后次序） */
+QFrame#CorePanel {{
+    background: {PANEL};
+    border: 2px solid {ACCENT};
+    border-radius: 10px;
+}}
+QLabel#CorePanelTitle {{
+    color: {ACCENT_DARK};
+    font-size: 12pt;
+    font-weight: 800;
+    padding: 0;
+}}
+QLabel#StepBadge {{
+    border-radius: 10px;
+    font-weight: 700;
+    font-size: 9pt;
+    padding: 0;
+}}
+QLabel#StepBadge[state="pending"] {{
+    color: {MUTED};
+    border: 1px solid {BORDER};
+    background: transparent;
+}}
+QLabel#StepBadge[state="active"] {{
+    color: #20242A;
+    background: {STEP_ACTIVE};
+    border: 1px solid {STEP_ACTIVE};
+}}
+QLabel#StepBadge[state="done"] {{
+    color: #FFFFFF;
+    background: #2FA97A;
+    border: 1px solid #2FA97A;
+}}
+QLabel#StepText {{
+    font-size: 9.5pt;
+    padding: 0;
+}}
+QLabel#StepText[state="pending"] {{ color: {MUTED}; }}
+QLabel#StepText[state="active"] {{ color: {STEP_ACTIVE}; font-weight: 700; }}
+QLabel#StepText[state="done"] {{ color: #2FA97A; font-weight: 600; }}
+QLabel#StepArrow {{
+    color: {MUTED};
+    font-weight: 700;
+}}
+/* 步骤徽章行下方的五段式进度条 */
+QFrame#ProgressSegment {{
+    background: {BORDER};
+    border: none;
+    border-radius: 2px;
+}}
+QFrame#ProgressSegment[state="done"] {{ background: #2FA97A; }}
+QFrame#ProgressSegment[state="active"] {{ background: {STEP_ACTIVE}; }}
+/* 向导页大号页头：圆形步骤号 + 标题 + 副标题 */
+QLabel#PageNumber {{
+    border: 2px solid {ACCENT};
+    border-radius: 15px;
+    color: {ACCENT_DARK};
+    font-size: 14pt;
+    font-weight: 800;
+}}
+QLabel#PageTitle {{
+    font-size: 12.5pt;
+    font-weight: 800;
+    color: {TEXT};
+}}
+QLabel#PageSubtitle {{
+    font-size: 9.5pt;
+    color: {MUTED};
+}}
+/* 步骤徽章行与页面内容之间的分隔线 */
+QFrame#StepDivider {{
+    background: {BORDER};
+    border: none;
+}}
+/* 当前步骤对应的行动按钮/结节列表：金色描边引导下一步操作 */
+QPushButton#Segment[current_step="true"] {{
+    border: 2px solid {STEP_ACTIVE};
+    font-weight: 700;
+}}
+QPushButton#Primary[current_step="true"] {{
+    border: 2px solid {STEP_ACTIVE};
+}}
+QListWidget#NoduleList[current_step="true"] {{
+    border: 2px solid {STEP_ACTIVE};
 }}
 QLabel#Status {{
     color: {MUTED};

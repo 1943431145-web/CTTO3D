@@ -574,8 +574,9 @@ def read_nifti(path, reference_image=None):
     reader = vtk.vtkNIFTIImageReader()
     reader.SetFileName(str(path))
     reader.Update()
-    image = vtk.vtkImageData()
-    image.DeepCopy(reader.GetOutput())
+    # reader 是本函数私有的，Update 之后不会再执行，直接引用其输出即可。
+    # 逐器官载入几十个 mask 时，整卷 DeepCopy 每个都要多搬一次全量内存。
+    image = reader.GetOutput()
     if reference_image is not None and image.GetDimensions() == reference_image.GetDimensions():
         image.SetOrigin(reference_image.GetOrigin())
         image.SetSpacing(reference_image.GetSpacing())
@@ -595,18 +596,17 @@ def mask_statistics(mask_image):
     return {"voxels": voxels, "volume_ml": volume_ml}
 
 
-def largest_mask_component(mask_image):
-    """找出 mask 中体素数最多的连通域（6 邻接），返回其质心与统计。
+def _mask_component_items(mask_image):
+    """枚举 mask 的全部 6 邻接连通域，按体素数降序。
 
-    用于肺结节分割完成后把参考坐标轴自动定位到最大结节。结节 mask 的
-    前景体素通常只有几千个，这里用 numpy 迭代扩张式洪泛（每轮向外扩
-    一层）做连通域标记，避免依赖 scipy（主环境不装 AI 依赖）。
+    largest_mask_component 与 mask_components 的共享实现。返回
+    None（空 mask / 无效输入），否则 (连通域总数, [组件 dict])，
+    组件 dict 含 ijk（整卷坐标质心）、voxels、volume_ml。
 
-    返回 None（空 mask / 无效输入），或 dict：
-      ijk         最大连通域质心的体素坐标 (i, j, k)（i 沿 x 轴）
-      voxels      该连通域体素数
-      volume_ml   该连通域体积
-      components  mask 内连通域总数
+    结节 mask 的前景体素通常只有几千个，这里用 numpy 迭代扩张式洪泛
+    （每轮向外扩一层）做连通域标记，避免依赖 scipy（主环境不装 AI
+    依赖）。不要对全卷尺寸的器官 mask 调用——种子循环是前景体素级的
+    Python 迭代。
     """
     if mask_image is None:
         return None
@@ -675,26 +675,59 @@ def largest_mask_component(mask_image):
             visited[fz, fy, fx] = True
         return count, (sum_z / count, sum_y / count, sum_x / count)
 
-    components = 0
-    best = None
+    items = []
     for seed in np.argwhere(box):
         z0, y0, x0 = int(seed[0]), int(seed[1]), int(seed[2])
         if visited[z0, y0, x0]:
             continue
-        components += 1
         count, centroid_zyx = _flood(z0, y0, x0)
-        if best is None or count > best[0]:
-            # 质心换算回整卷坐标 (k, j, i) -> (i, j, k)，并加包围盒偏移。
-            cz, cy, cx = centroid_zyx
-            best = (count, (cx + lo[2], cy + lo[1], cz + lo[0]))
+        # 质心换算回整卷坐标 (k, j, i) -> (i, j, k)，并加包围盒偏移。
+        cz, cy, cx = centroid_zyx
+        items.append({
+            "ijk": tuple(float(v) for v in (cx + lo[2], cy + lo[1], cz + lo[0])),
+            "voxels": int(count),
+            "volume_ml": count * voxel_ml,
+        })
+    items.sort(key=lambda item: item["voxels"], reverse=True)
+    return len(items), items
 
-    voxels, centroid_ijk = best
+
+def largest_mask_component(mask_image):
+    """找出 mask 中体素数最多的连通域（6 邻接），返回其质心与统计。
+
+    用于肺结节分割完成后把参考坐标轴自动定位到最大结节。
+
+    返回 None（空 mask / 无效输入），或 dict：
+      ijk         最大连通域质心的体素坐标 (i, j, k)（i 沿 x 轴）
+      voxels      该连通域体素数
+      volume_ml   该连通域体积
+      components  mask 内连通域总数
+    """
+    result = _mask_component_items(mask_image)
+    if result is None:
+        return None
+    components, items = result
+    best = items[0]
     return {
-        "ijk": tuple(float(v) for v in centroid_ijk),
-        "voxels": voxels,
-        "volume_ml": voxels * voxel_ml,
+        "ijk": best["ijk"],
+        "voxels": best["voxels"],
+        "volume_ml": best["volume_ml"],
         "components": components,
     }
+
+
+def mask_components(mask_image, max_count=16):
+    """枚举 mask 的全部连通域（6 邻接），按体积降序返回前 max_count 个。
+
+    结节定位卡片用：分割完成后列出每个结节区域供逐个点击定位，而不是
+    只定位最大的一个。返回 list[dict]（键同 largest_mask_component 去掉
+    components），空 mask 返回 []。只用于前景体素量级为几千的小 mask。
+    """
+    result = _mask_component_items(mask_image)
+    if result is None:
+        return []
+    _components, items = result
+    return items[:max_count]
 
 
 def mask_files(output_dir, expected_names=None):

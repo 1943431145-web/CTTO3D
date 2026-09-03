@@ -123,11 +123,20 @@ def _build_segresnet(model_dir):
 
 
 def _normalise_ct(volume):
-    """Map the standard lung CT window [-1000, 400] HU to [0, 1]."""
+    """Map the standard lung CT window [-1000, 400] HU to [0, 1].
+
+    全程原地修改：已是 float32 时零拷贝（否则只物化一份 float32）。全卷
+    CT 每多一份中间数组就是几百 MB 峰值内存；唯一调用方传入的是刚从
+    NIfTI 读出的数组，原始 HU 值在归一化之后不再使用。
+    """
     import numpy as np
 
-    volume = np.nan_to_num(volume, nan=-1000.0, posinf=400.0, neginf=-1000.0)
-    return np.clip((volume.astype(np.float32) + 1000.0) / 1400.0, 0.0, 1.0)
+    volume = np.asarray(volume, dtype=np.float32)
+    np.nan_to_num(volume, copy=False, nan=-1000.0, posinf=400.0, neginf=-1000.0)
+    volume += 1000.0
+    volume /= 1400.0
+    np.clip(volume, 0.0, 1.0, out=volume)
+    return volume
 
 
 def _largest_lung_components(mask):

@@ -448,6 +448,15 @@ def _load_dicom_sources(sources, read_dataset, progress=None):
     patient_position = str(getattr(ref, "PatientPosition", "") or "").strip()
     if patient_position:
         info["patient_position"] = patient_position
+    # 患者信息（规划核对单用）：与导入列表的预览元数据同源、取自同一参考层。
+    for info_key, dicom_attr in (
+            ("patient_name", "PatientName"),
+            ("patient_id", "PatientID"),
+            ("study_date", "StudyDate"),
+            ("series_description", "SeriesDescription")):
+        value = _clean_dicom_text(getattr(ref, dicom_attr, ""))
+        if value:
+            info[info_key] = value
     _notify_progress(progress, 1.0, "影像解码完成")
     return image, info
 

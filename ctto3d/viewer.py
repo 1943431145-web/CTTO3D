@@ -34,6 +34,7 @@ import logging
 import math
 import os
 
+import numpy as np
 import vtk
 from PySide6 import QtCore, QtGui, QtWidgets
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
@@ -259,6 +260,10 @@ class VolumeViewer(QtWidgets.QWidget):
         用于让主窗口的「显示针」按钮与实际状态保持同步。
     """
     ablationNeedleChanged = QtCore.Signal(bool)
+    # 入针点/消融点被放置、更新或清除时发出。主窗口据此刷新规划状态行与
+    # 三步指示条——放置入口不止左面板按钮（切片右键、推荐结果回填等），
+    # 状态不能只依赖按钮回调自己刷新。
+    planningChanged = QtCore.Signal()
     # 3D 视图交互（旋转/平移/缩放）结束时发出；主窗口用它在空闲时段
     # 刷新弹层毛玻璃背景缓存，保证下次打开弹窗时背景是当前视角。
     interactionEnded = QtCore.Signal()
@@ -296,7 +301,10 @@ class VolumeViewer(QtWidgets.QWidget):
         # During a fullscreen resize, keep the last completed VTK frame visible
         # above the native render widget.  Qt can then present the new layout
         # immediately instead of waiting for a large synchronous volume render.
-        self._view3d_transition_overlay = QtWidgets.QLabel(self.view3d_frame)
+        # 覆盖层的父控件是 viewer 而非 view3d_frame：它必须能在 frame 改变
+        # 几何之前就先铺到目标矩形，否则 GL 原生窗口 resize 的瞬间 DWM 会
+        # 把旧帧拉伸铺满新窗口，内容先被拉宽再跳回截图，形成闪变。
+        self._view3d_transition_overlay = QtWidgets.QLabel(self)
         self._view3d_transition_overlay.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignCenter)
         self._view3d_transition_overlay.setStyleSheet("background: #000000;")
@@ -387,6 +395,7 @@ class VolumeViewer(QtWidgets.QWidget):
         self._pending_slice_resumes = []
         self._view3d_resize_quality = None
         self._view3d_fullscreen_transition = False
+        self._view3d_prerendered_reveal = False
         self._view3d_lazy_pending = False
         # 几何同步合并调度标志 + 过渡图缩放缓存键（(cacheKey, 目标高度)）。
         # 没有它们，全屏期间 LayoutRequest → setPixmap → LayoutRequest 会
@@ -569,7 +578,11 @@ class VolumeViewer(QtWidgets.QWidget):
                         return True
                     self._show_3d_context_menu(event.globalPosition().toPoint())
                     return True
-            # 3D 视图不再响应双击全屏；切片图仍可双击放大
+            if et == QtCore.QEvent.Type.MouseButtonDblClick:
+                # 双击 3D 视图 → 全屏 / 还原（与切片双击放大一致；
+                # 未加载体数据或过渡动画中由 _toggle 内部忽略）
+                self._toggle_view3d_fullscreen()
+                return True
         return super().eventFilter(obj, event)
 
     def _repolish(self, widget):
@@ -602,6 +615,12 @@ class VolumeViewer(QtWidgets.QWidget):
         """双击 3D 视图在"全屏(隐藏右侧切片栏)"与正常布局间切换。"""
         if self.image is None or self._view3d_fullscreen_transition:
             return
+        # 切片放大浮层展开期间 3D frame 是隐藏的：真实鼠标事件到不了它，
+        # 但程序化触发（如定位取景）仍可能发生；此时进入全屏会得到一个
+        # 被浮层盖住的全屏布局，收回顺序不可预期，直接拒绝。
+        if getattr(self, "expanded_slice", None) is not None \
+                and self.expanded_slice.isVisible():
+            return
         self._view3d_present_timer.stop()
         self._view3d_refine_timer.stop()
         self._view3d_silent_refine_timer.stop()
@@ -616,8 +635,38 @@ class VolumeViewer(QtWidgets.QWidget):
         self._view3d_lazy_pending = False
         self._view3d_lazy_restore_timer.stop()
         self._finish_view3d_resize_render(render=False)
+        if not self._view3d_fullscreen:
+            # 放大方向：先渲染后显示。先用旧视图盖住 GL（旧矩形、无黑边），
+            # 再离屏渲染出全屏尺寸的最终帧——期间画面保持旧视图静止；
+            # 成功后几何切换全程被最终帧覆盖，不存在拉伸/黑边/内容迟到。
+            self._show_view3d_transition_overlay(grab=True)
+            final_image = self._prerender_view3d_frame(
+                self.rect().width(), self.rect().height())
+            if final_image is not None:
+                self._enter_view3d_fullscreen_prerendered(final_image)
+                return
+        else:
+            # 收回方向：同样先渲染后显示。离屏渲染小视口最终帧后，覆盖层
+            # 在隐藏状态下换好目标尺寸与内容再"全新显示"——原生窗口不
+            # 经历 resize，系统不会缩放旧内容，收回瞬间没有弹跳。
+            self._show_view3d_transition_overlay(grab=True)
+            normal = self._normal_view3d_geometry()
+            final_image = self._prerender_view3d_frame(
+                normal.width(), normal.height())
+            if final_image is not None:
+                self._exit_view3d_fullscreen_prerendered(final_image)
+                return
+        # 预渲染失败（离屏上下文不可用等）：退回"渲染期间系统拉伸占位"
+        # 的原路径（覆盖层已显示旧视图，下面 grab 无害）。
         self._show_view3d_transition_overlay(grab=not reuse_lazy_frame)
-        self._begin_view3d_resize_render()
+        # 只有收回才进入粗采样模式：首个小视口帧用 ISD=6 换取更快的呈现，
+        # present 后立即还原画质。放大方向不再降采样——旧的"粗帧 + 280ms
+        # 后精修"画质阶梯会让画面先糊一下再变清晰，正好被看成"放大后模
+        # 糊了一下"；渲染等待期间过渡占位图本来就盖着，粗帧没有收益，
+        # 首个全屏帧直接按正常画质渲染。（此刻 _view3d_fullscreen 尚未翻
+        # 转，True 即"即将收回"。）
+        if self._view3d_fullscreen:
+            self._begin_view3d_resize_render()
         # 右侧切片栏始终保持可见、保持原尺寸，只由 3D frame 临时覆盖。
         # 因此三个 QVTK 切片窗口完全不 resize，也不会在收回时各自触发
         # fit_timer + paintEvent 的同步渲染风暴。
@@ -632,8 +681,17 @@ class VolumeViewer(QtWidgets.QWidget):
         self._view3d_fullscreen = not self._view3d_fullscreen
         self.view3d_frame.setProperty("fullscreen", self._view3d_fullscreen)
         self._repolish(self.view3d_frame)
+        # 收回：先把覆盖层缩到目标矩形再改 frame 几何，GL 旧帧被系统拉伸
+        # 的瞬间不外露。放大：覆盖层保持在旧矩形（中心 1:1 截图盖住解剖，
+        # 不变形），改几何后露出的两侧由系统对旧帧的拉伸即时填充——两侧
+        # 零黑屏、零"迟到"，等真实帧渲染完成后由
+        # _reveal_view3d_transition_over_frames 平滑校正两侧比例。
+        if not self._view3d_fullscreen:
+            self._view3d_transition_overlay.setGeometry(
+                self._normal_view3d_geometry())
         self._apply_view3d_fullscreen_geometry()
-        self._sync_view3d_transition_overlay()
+        if not self._view3d_fullscreen:
+            self._sync_view3d_transition_overlay()
         self.update()
         self._view3d_present_timer.start()
 
@@ -669,6 +727,9 @@ class VolumeViewer(QtWidgets.QWidget):
 
     def _show_view3d_transition_overlay(self, grab=True):
         """Show the last completed 3D frame without triggering a new render."""
+        self._view3d_reveal_generation = (
+            getattr(self, "_view3d_reveal_generation", 0) + 1)
+        self._view3d_prerendered_reveal = False
         self._view3d_transition_fade.stop()
         self._view3d_transition_opacity.setOpacity(1.0)
         if grab:
@@ -753,33 +814,42 @@ class VolumeViewer(QtWidgets.QWidget):
         self._fade_slice_transition_overlays()
 
     def _sync_view3d_transition_overlay(self):
-        target_rect = self.view3d_frame.rect()
+        if (getattr(self, "_view3d_fullscreen_transition", False)
+                and self._view3d_fullscreen):
+            # 放大等待期：覆盖层保持在旧位置只盖中心，两侧露出的系统拉伸
+            # 旧帧就是占位（零黑屏）；几何同步会把覆盖层铺满、制造黑边，
+            # present 之后由 _reveal_view3d_transition_over_frames 接管。
+            return
+        # 覆盖层是 viewer 的子控件（见创建处说明），frame.geometry() 直接
+        # 就是它在本控件坐标系里的目标矩形。
+        target_rect = self.view3d_frame.geometry()
         if self._view3d_transition_overlay.geometry() != target_rect:
             self._view3d_transition_overlay.setGeometry(target_rect)
         if not self._view3d_transition_image.isNull():
-            # The VTK framebuffer uses physical pixels. Keep its vertical
-            # scale tied to the viewport height: when leaving fullscreen the
-            # target becomes narrower, so QLabel crops equal amounts from the
-            # left and right instead of shrinking the model and making it jump
-            # back to size when the real VTK frame appears.
+            # 占位策略（多轮实测迭代后的结论，勿再尝试"合成两侧内容"）：
+            #   旧截图按高度 1:1 居中——中心与最终帧逐像素一致（不变形），
+            #   两侧留纯黑（标签背景色与 3D 背景同为纯黑）。真实帧就绪后
+            #   由 _present_view3d_after_resize 发起 140ms 交叉淡出：中心
+            #   两帧内容相同、淡出不可见，只表现为两侧从黑渐显出真实解剖。
+            #   拉伸会变形、单列平铺会出竖纹（拖影）、镜像模糊会复制出
+            #   第二份结构（重影），都不如"黑 + 淡出"干净。
+            # 收回方向：旧图比目标宽 → 同样按高度等比缩放，QLabel 居中
+            # 裁掉两侧（模型不缩小，真实帧出现时不会回弹）。
             dpr = max(1.0, float(self.devicePixelRatioF()))
-            target_height = max(
-                1,
-                int(round(self._view3d_transition_overlay.height() * dpr)),
-            )
+            overlay = self._view3d_transition_overlay
+            target_h = max(1, int(round(overlay.height() * dpr)))
+            image = self._view3d_transition_image
             # setPixmap 会触发 updateGeometry → LayoutRequest，而 event()
             # 对 LayoutRequest 又会调度几何同步；不做键值缓存的话这里会
             # 形成"每帧重复缩放整幅过渡图"的反馈循环。
-            key = (self._view3d_transition_image.cacheKey(), target_height)
+            key = (image.cacheKey(), target_h)
             if key != self._view3d_overlay_pixmap_key:
                 self._view3d_overlay_pixmap_key = key
-                pixmap = QtGui.QPixmap.fromImage(
-                    self._view3d_transition_image).scaledToHeight(
-                        target_height,
-                        QtCore.Qt.TransformationMode.FastTransformation,
-                    )
+                pixmap = QtGui.QPixmap.fromImage(image).scaledToHeight(
+                    target_h,
+                    QtCore.Qt.TransformationMode.SmoothTransformation)
                 pixmap.setDevicePixelRatio(dpr)
-                self._view3d_transition_overlay.setPixmap(pixmap)
+                overlay.setPixmap(pixmap)
         if self._view3d_transition_overlay.isVisible():
             self._view3d_transition_overlay.raise_()
 
@@ -790,6 +860,223 @@ class VolumeViewer(QtWidgets.QWidget):
         self._view3d_transition_fade.setStartValue(1.0)
         self._view3d_transition_fade.setEndValue(0.0)
         self._view3d_transition_fade.start()
+
+    def _reveal_view3d_transition_over_frames(self):
+        """逐帧把覆盖层内容混合为真实画面后隐藏（真实像素"淡出"）。
+
+        覆盖层为盖住原生 GL 子窗口被 Qt 连带原生化，QGraphicsOpacityEffect
+        对原生窗口不生效——透明度动画只会空转。这里改用真像素：present 已
+        把最终画面渲染进 GL 帧缓冲，用 vtkWindowToImageFilter 直接从帧缓冲
+        读回（与屏幕遮挡无关）；基准帧则抓取"当前屏幕实际所见"（放大等待
+        期 = 中心 1:1 截图 + 两侧系统拉伸的旧帧，无黑屏）。覆盖层铺满后从
+        当前所见逐帧混合到真实画面——每一帧都与上一帧连续，隐藏瞬间上下
+        内容一致。读回的 GPU 同步开销发生在两侧已有拉伸占位的等待期内，
+        用户看到的是静态画面被平滑校正，而不是内容迟到。
+        """
+        overlay = self._view3d_transition_overlay
+        if overlay.isHidden():
+            self._complete_view3d_transition_overlay()
+            return
+        try:
+            reader = vtk.vtkWindowToImageFilter()
+            reader.SetInput(self.render_window)
+            reader.SetScale(1)
+            reader.Update()
+            data = reader.GetOutput()
+            from vtk.util import numpy_support
+            fx, fy, _fz = data.GetDimensions()
+            arr = numpy_support.vtk_to_numpy(
+                data.GetPointData().GetScalars()).reshape(fy, fx, 3)
+            final_image = QtGui.QImage(
+                np.ascontiguousarray(arr[::-1]).data, fx, fy, fx * 3,
+                QtGui.QImage.Format_RGB888).copy()
+        except Exception:
+            log.exception("读回过渡终帧失败，直接整帧替换")
+            self._complete_view3d_transition_overlay()
+            return
+        if final_image.isNull():
+            self._complete_view3d_transition_overlay()
+            return
+
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        frame = self.view3d_frame
+        target_w = max(1, int(round(frame.width() * dpr)))
+        target_h = max(1, int(round(frame.height() * dpr)))
+        final = QtGui.QPixmap.fromImage(final_image).scaled(
+            target_w, target_h,
+            QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation)
+        # 基准帧 = 当前屏幕实际呈现（含覆盖层与两侧拉伸旧帧）；抓不到时
+        # 退回"旧截图 + 黑边"的字母框基准（两侧会有一段黑，但仍平滑）。
+        base_image = self._grab_presented_widget_image(self.vtk_widget)
+        if not base_image.isNull():
+            base = QtGui.QPixmap.fromImage(base_image).scaled(
+                target_w, target_h,
+                QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation)
+        else:
+            base = QtGui.QPixmap(target_w, target_h)
+            base.fill(QtCore.Qt.GlobalColor.black)
+            current = overlay.pixmap()
+            if not current.isNull():
+                current = QtGui.QPixmap(current)
+                current.setDevicePixelRatio(1.0)
+                painter = QtGui.QPainter(base)
+                painter.drawPixmap(
+                    (target_w - current.width()) // 2, 0, current)
+                painter.end()
+
+        generation = getattr(self, "_view3d_reveal_generation", 0)
+        # 覆盖层铺满目标矩形并立即换上第一帧混合结果（同一更新周期生效，
+        # 不出现黑边中间帧）。
+        overlay.setGeometry(frame.geometry())
+        self._blend_view3d_overlay_steps(
+            base, final, target_w, target_h, dpr, generation, hide_when_done=True)
+
+    def _blend_view3d_overlay_steps(self, base, final, target_w, target_h, dpr,
+                                    generation, hide_when_done):
+        """驱动覆盖层内容分步混合到最终画面（真实像素"淡出"的步进部分）。
+
+        hide_when_done=False 时（预渲染路径）混合完保持显示最终帧，由
+        present 在在屏渲染完成后隐藏——覆盖层与屏上内容一致，隐藏无跳变。
+        """
+        overlay = self._view3d_transition_overlay
+
+        def apply_step(index):
+            if generation != getattr(self, "_view3d_reveal_generation", 0) \
+                    or overlay.isHidden():
+                return
+            blended = QtGui.QPixmap(target_w, target_h)
+            painter = QtGui.QPainter(blended)
+            painter.drawPixmap(0, 0, base)
+            painter.setOpacity((index + 1) / float(self._REVEAL_STEPS))
+            painter.drawPixmap(0, 0, final)
+            painter.end()
+            blended.setDevicePixelRatio(dpr)
+            overlay.setPixmap(blended)
+            if index + 1 < self._REVEAL_STEPS:
+                QtCore.QTimer.singleShot(
+                    self._REVEAL_STEP_MS, lambda: apply_step(index + 1))
+            elif hide_when_done:
+                self._complete_view3d_transition_overlay()
+
+        apply_step(0)
+
+    _REVEAL_STEPS = 6
+    _REVEAL_STEP_MS = 18
+
+    def _prerender_view3d_frame(self, width, height):
+        """离屏渲染目标尺寸的最终帧并读回（失败返回 None）。
+
+        在几何切换之前执行，画面仍由覆盖层显示旧视图，用户只感知到短暂
+        静止。读回走 GL 帧缓冲，与屏幕遮挡无关。
+        """
+        if self.image is None or width < 2 or height < 2:
+            return None
+        window = self.render_window
+        old_size = (int(window.GetSize()[0]), int(window.GetSize()[1]))
+        try:
+            window.SetOffScreenRendering(True)
+            window.SetSize(int(width), int(height))
+            window.Render()
+            reader = vtk.vtkWindowToImageFilter()
+            reader.SetInput(window)
+            reader.SetScale(1)
+            reader.Update()
+            data = reader.GetOutput()
+            from vtk.util import numpy_support
+            fx, fy, _fz = data.GetDimensions()
+            arr = numpy_support.vtk_to_numpy(
+                data.GetPointData().GetScalars()).reshape(fy, fx, 3)
+            return QtGui.QImage(
+                np.ascontiguousarray(arr[::-1]).data, fx, fy, fx * 3,
+                QtGui.QImage.Format_RGB888).copy()
+        except Exception:
+            log.exception("离屏预渲染最终帧失败")
+            return None
+        finally:
+            try:
+                window.SetSize(*old_size)
+                window.SetOffScreenRendering(False)
+            except Exception:
+                pass
+
+    def _enter_view3d_fullscreen_prerendered(self, final_image):
+        """用预渲染的最终帧完成放大切换：全程无拉伸、无黑边（除渐显）。"""
+        overlay = self._view3d_transition_overlay
+        frame = self.view3d_frame
+        self._view3d_fullscreen_transition = True
+        self.interactor.EnableRenderOff()
+        self.vtk_widget.setUpdatesEnabled(False)
+        self._view3d_fullscreen = True
+        self.view3d_frame.setProperty("fullscreen", True)
+        self._repolish(frame)
+        # 覆盖层先于帧几何铺满目标矩形并换上混合第一帧：系统对 GL 旧帧的
+        # 拉伸从未暴露。
+        target_rect = self.rect()
+        overlay.setGeometry(target_rect)
+        self._apply_view3d_fullscreen_geometry()
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        target_w = max(1, int(round(target_rect.width() * dpr)))
+        target_h = max(1, int(round(target_rect.height() * dpr)))
+        final = QtGui.QPixmap.fromImage(final_image).scaled(
+            target_w, target_h,
+            QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation)
+        base = QtGui.QPixmap(target_w, target_h)
+        base.fill(QtCore.Qt.GlobalColor.black)
+        current = overlay.pixmap()
+        if not current.isNull():
+            current = QtGui.QPixmap(current)
+            current.setDevicePixelRatio(1.0)
+            painter = QtGui.QPainter(base)
+            painter.drawPixmap((target_w - current.width()) // 2, 0, current)
+            painter.end()
+        generation = getattr(self, "_view3d_reveal_generation", 0)
+        self._view3d_prerendered_reveal = True
+        self._blend_view3d_overlay_steps(
+            base, final, target_w, target_h, dpr, generation,
+            hide_when_done=False)
+        self.update()
+        self._view3d_present_timer.start()
+
+    def _exit_view3d_fullscreen_prerendered(self, final_image):
+        """用预渲染的小视口最终帧完成收回：覆盖层全新显示，零缩放帧。
+
+        覆盖层是原生窗口——直接 resize 的话，系统在它重绘前会把旧内容
+        缩放一帧（收回时的"弹一下"）。因此在隐藏状态下换好目标矩形与
+        最终内容，再全新显示：原生窗口首次出现不经过 resize。随后帧几何
+        收回、present 在屏渲染完成后隐藏覆盖层（内容一致，零跳变）。
+        """
+        overlay = self._view3d_transition_overlay
+        target_rect = self._normal_view3d_geometry()
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        target_w = max(1, int(round(target_rect.width() * dpr)))
+        target_h = max(1, int(round(target_rect.height() * dpr)))
+        final = QtGui.QPixmap.fromImage(final_image).scaled(
+            target_w, target_h,
+            QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation)
+        final.setDevicePixelRatio(dpr)
+
+        overlay.hide()
+        self._view3d_transition_image = final_image
+        self._view3d_overlay_pixmap_key = None
+        overlay.setGeometry(target_rect)
+        overlay.setPixmap(final)
+
+        self._view3d_fullscreen_transition = True
+        self.interactor.EnableRenderOff()
+        self.vtk_widget.setUpdatesEnabled(False)
+        self._view3d_fullscreen = False
+        self.view3d_frame.setProperty("fullscreen", False)
+        self._repolish(self.view3d_frame)
+        self._apply_view3d_fullscreen_geometry()   # frame 收回 + 抬升 frame/切片栏
+        overlay.show()
+        overlay.raise_()
+        self._view3d_prerendered_reveal = True
+        self.update()
+        self._view3d_present_timer.start()
 
     def _complete_view3d_transition_overlay(self):
         self._view3d_transition_overlay.hide()
@@ -803,12 +1090,24 @@ class VolumeViewer(QtWidgets.QWidget):
         quality = self._view3d_resize_quality or {}
         if (self._view3d_fullscreen_transition
                 and quality.get("collapsing", False)):
-            # 收回时截图覆盖层已经是完整可用的一帧。首个 resize Render 在
-            # 实机上仍需 150~210ms，即使 ISD=6；直接延迟到下一次真正交互，
-            # 让双击收回本身只做几何切换，不再冻结 UI。
+            # 双击收回：视口已回到小尺寸，ISD=6 的粗采样帧在小视口上的开销
+            # 与一次普通交互帧相同（大 CT 上约 150~200ms 的一次性等待）。
+            # 立即渲染换上真画面——旧方案完全不渲染、进入“静态截图 + 等
+            # 用户拖动才唤醒”的懒状态，而悬停/单击都不会触发唤醒，收回后
+            # 的 3D 视图看起来就像界面卡死。
             self._view3d_fullscreen_transition = False
-            self._finish_view3d_resize_render(render=False)
-            self._view3d_lazy_pending = True
+            self.vtk_widget.setUpdatesEnabled(True)
+            self.interactor.EnableRenderOn()
+            try:
+                if self.image is not None and self.isVisible():
+                    self.render_window.Render()
+            finally:
+                # 还原映射器质量但不追加渲染：小视口上这一帧已足够清晰，
+                # 下次自然交互会按正常画质渲染。
+                self._finish_view3d_resize_render(render=False)
+                # 过渡图是全屏截图缩到小视口的版本，与新帧同源但清晰度不
+                # 同；渲染完成后直接整帧替换，不做半透明交叉淡化。
+                self._complete_view3d_transition_overlay()
             return
         self.vtk_widget.setUpdatesEnabled(True)
         self.interactor.EnableRenderOn()
@@ -822,7 +1121,15 @@ class VolumeViewer(QtWidgets.QWidget):
             if self._view3d_fullscreen_transition:
                 # 纯 3D 覆盖式切换：切片从未隐藏/缩放，不需要恢复或重绘。
                 self._view3d_fullscreen_transition = False
-                self._fade_view3d_transition_overlay()
+                if getattr(self, "_view3d_prerendered_reveal", False):
+                    # 预渲染路径：覆盖层早已显示最终帧（离屏预渲染产物），
+                    # 在屏渲染完成后直接隐藏——上下内容一致，零跳变。
+                    self._view3d_prerendered_reveal = False
+                    self._complete_view3d_transition_overlay()
+                else:
+                    # 常规路径：从帧缓冲读回最终帧，从"当前所见"逐帧混合
+                    # （原生窗口不支持透明特效，只能用真实像素）。
+                    self._reveal_view3d_transition_over_frames()
             else:
                 # 此分支只服务“放大切片→收回”的旧布局切换路径。
                 self.slice_panel.setUpdatesEnabled(True)
@@ -2013,9 +2320,9 @@ class VolumeViewer(QtWidgets.QWidget):
     # 入针点/消融点球：半径 = 针的可见半径 × 下面的倍数。
     # 消融点球半透明，好让球心下面的组织和消融范围椭球透出来；入针点在体表，
     # 不会挡住什么，保持不透明便于一眼定位。
-    _ENTRY_SPHERE_SCALE = 3.0
+    _ENTRY_SPHERE_SCALE = 3.5
     _ENTRY_SPHERE_OPACITY = 1.0
-    _TIP_SPHERE_SCALE = 4.0
+    _TIP_SPHERE_SCALE = 4.5
     _TIP_SPHERE_OPACITY = 0.45
 
     def has_ablation_needle(self):
@@ -2240,10 +2547,14 @@ class VolumeViewer(QtWidgets.QWidget):
         self._rebuild_planning_marker(kind)
         if (self._planning_points["entry"] is not None
                 and self._planning_points["tip"] is not None):
-            return self.connect_planning_points()
+            connected = self.connect_planning_points()
+            # 连成针道之后再发信号：刷新方才能读到针道长度/角度等派生量。
+            self.planningChanged.emit()
+            return connected
         self._refresh_slice_points()
         self.renderer.ResetCameraClippingRange()
         self.render()
+        self.planningChanged.emit()
         return False
 
     def connect_planning_points(self):
@@ -2266,6 +2577,7 @@ class VolumeViewer(QtWidgets.QWidget):
         self._planning_points = {"entry": None, "tip": None}
         self._remove_planning_markers()
         self._refresh_slice_points()
+        self.planningChanged.emit()
         self.render()
 
     def _remove_planning_markers(self):
@@ -2357,6 +2669,142 @@ class VolumeViewer(QtWidgets.QWidget):
             for i in range(3)
         )
 
+    # ---- 定位取景与规划核对单（mainwindow 的结节定位卡片/报告导出使用）----
+
+    def needle_axis_angles(self):
+        """针道方向与世界 X/Y/Z 轴的夹角（度）；未连成针道时 None。"""
+        return self._needle_axis_angles()
+
+    def needle_path_length_mm(self):
+        """入针点到消融点的针道长度（mm）；未连成针道时 None。"""
+        if self._ablation_needle is None:
+            return None
+        p0 = self._ablation_needle["entry_world"]
+        p1 = self._ablation_needle["tip_world"]
+        return math.sqrt(sum((p1[i] - p0[i]) ** 2 for i in range(3)))
+
+    def planning_world_points(self):
+        """规划点（入针点/消融点）的世界坐标 mm；未放置的为 None。"""
+        output = {}
+        for kind in ("entry", "tip"):
+            ijk = self._planning_points.get(kind)
+            output[kind] = None if ijk is None else tuple(
+                float(v) for v in self._ijk_to_world(ijk))
+        return output
+
+    def ablation_params(self):
+        """当前消融针几何参数（mm）的副本。"""
+        return dict(self._ablation_params)
+
+    def ablation_zone_info(self):
+        """当前消融椭球半轴与体积；未放置消融区时 None。"""
+        zone = self._ablation_zone
+        if not zone:
+            return None
+        half_long = float(zone["half_long"])
+        half_short = float(zone["half_short"])
+        return {
+            "half_long_mm": half_long,
+            "half_short_mm": half_short,
+            # 绕针长轴的旋转椭球：V = 4/3·π·a·b²
+            "volume_ml": 4.0 / 3.0 * math.pi * half_long * half_short ** 2 / 1000.0,
+        }
+
+    def nodule_depth_mm(self, ijk):
+        """结节质心沿腹侧方向到体表的距离（mm）；射线不可解时 None。
+
+        用与自动推荐入针点同一套 HU 体壁检测，只在单条射线上采样，
+        单次调用毫秒级，可逐结节调用。
+        """
+        if self.image is None or ijk is None:
+            return None
+        args = self.planning_entry_search_args(tip_ijk=ijk)
+        if args is None:
+            return None
+        anterior, _view_up = self._anatomical_camera_axes(self.info)
+        try:
+            entry = needle_planning.find_body_entry_on_ray(
+                args["volume"], args["spacing"], args["target_ijk"],
+                anterior, max_length_mm=max(250.0, args["max_length_mm"]))
+        except Exception:
+            return None
+        if not entry:
+            return None
+        return float(entry["path_length_mm"])
+
+    def focus_camera_on_ijk(self, ijk, direction_world=None):
+        """把 3D 相机转到从指定一侧观察 ijk（保持当前距离，不渲染）。
+
+        direction_world 是"从病灶指向相机"的方向，默认取患者腹侧（与
+        reset_view 同源），即从前方看病灶；传入 normalize(entry-tip)
+        可从入针侧预演进针视角。渲染由随后的十字联动 flush/调用方完成。
+        """
+        if self.image is None or ijk is None:
+            return False
+        world = self._ijk_to_world(self._clamp_ijk(ijk))
+        anterior, view_up = self._anatomical_camera_axes(self.info)
+        direction = anterior if direction_world is None else tuple(
+            float(v) for v in direction_world)
+        norm = math.sqrt(sum(v * v for v in direction))
+        if norm < 1.0e-9:
+            return False
+        direction = tuple(v / norm for v in direction)
+        cam = self.renderer.GetActiveCamera()
+        distance = max(float(cam.GetDistance()), 1.0)
+        cam.SetFocalPoint(*world)
+        cam.SetPosition(*(world[i] + direction[i] * distance for i in range(3)))
+        # 视角上方固定为头侧，并投影到成像平面内（与 reset_view 同一约束）。
+        along = sum(view_up[i] * direction[i] for i in range(3))
+        up = tuple(view_up[i] - along * direction[i] for i in range(3))
+        up_norm = math.sqrt(sum(v * v for v in up))
+        if up_norm > 1.0e-6:
+            cam.SetViewUp(*(v / up_norm for v in up))
+        cam.OrthogonalizeViewUp()
+        self.renderer.ResetCameraClippingRange()
+        self._widen_clipping_for_crosshair()
+        return True
+
+    def enter_view3d_fullscreen(self):
+        """定位取景用：未处于全屏时进入 3D 全屏；已全屏/过渡中则不动。"""
+        if (self.image is not None and not self._view3d_fullscreen
+                and not self._view3d_fullscreen_transition):
+            self._toggle_view3d_fullscreen()
+            return True
+        return False
+
+    def capture_report_pngs(self):
+        """抓取 3D 与三向切片当前画面，返回 {名称: PNG 字节}。
+
+        用 vtkWindowToImageFilter 从各渲染窗口自己的帧缓冲读回，与屏幕
+        遮挡无关（3D 全屏盖住切片栏时也能抓到切片画面）。单次调用四次
+        GPU 读回，仅用于导出核对单一类低频操作。
+        """
+        from vtk.util import numpy_support
+
+        output = {}
+        targets = [("view3d", self.render_window)]
+        for view in self.slice_panel.views:
+            window = view.image_viewer.GetRenderWindow()
+            if window is not None:
+                targets.append((view.orientation, window))
+        for name, window in targets:
+            try:
+                window.Render()
+                reader = vtk.vtkWindowToImageFilter()
+                reader.SetInput(window)
+                reader.SetScale(1)
+                reader.Update()
+                writer = vtk.vtkPNGWriter()
+                writer.SetWriteToMemory(True)
+                writer.SetInputConnection(reader.GetOutputPort())
+                writer.Write()
+                data = numpy_support.vtk_to_numpy(writer.GetResult()).tobytes()
+                if data:
+                    output[str(name)] = data
+            except Exception:
+                continue        # 单个视图失败不应让整份核对单导不出来
+        return output
+
     def _needle_angle_text(self, ax, ay, az):
         if self._cjk_font:
             return ("消融针进针角度\n"
@@ -2424,6 +2872,10 @@ class VolumeViewer(QtWidgets.QWidget):
     # 若上游退化为六轴解算，偏航(yaw)会缓慢漂移；可把这里改成 False，仅显示
     # 有重力校正的俯仰+横滚。九轴数据正常时保持 True 显示完整姿态。
     _IMU_NEEDLE_USE_YAW = True
+    # 遥测刷新死区：温度(°C)/俯仰/横滚/偏航(°)及磁场(µT)的变化都小于阈值时
+    # 不重渲染。遥测约 20 帧/秒，探针静止时若无死区，每帧都会全量体渲染。
+    _IMU_READOUT_EPS = (0.05, 0.05, 0.05, 0.05)
+    _IMU_MAGNETIC_EPS = 0.5
 
     def _make_imu_temp_actor(self):
         """右上角 HUD：消融针传感器读数（温度 + 俯仰/横滚/偏航）。"""
@@ -2727,6 +3179,11 @@ class VolumeViewer(QtWidgets.QWidget):
 
         由主窗口在解析到 IMU 串口遥测后调用。姿态只驱动右上角立体针旋转；
         可选三轴磁场驱动绿色方向箭头。这里不做任何位置积分或平移。
+
+        遥测约 20 帧/秒，而一次 render() 是全量体渲染：读数总是缓存并同步
+        到 HUD actor（纯属性更新，很便宜），但只在数值越过死区、且已加载
+        体数据（HUD 仅在有数据时可见，见 _refresh_imu_readout_overlay）
+        时才真正重渲染。
         """
         magnetic_value = None
         if magnetic is not None:
@@ -2735,16 +3192,44 @@ class VolumeViewer(QtWidgets.QWidget):
                 raise ValueError("magnetic must contain exactly three axes")
         # Only the orientation HUD is updated.  Deliberately do not modify the
         # planned needle entry/tip or integrate a translation from sensor data.
-        self._imu_readout = (
+        readout = (
             float(temp_c), float(pitch), float(roll), float(yaw), magnetic_value)
+        changed = self._imu_readout_changed(readout)
+        self._imu_readout = readout
         self._refresh_imu_readout_overlay()
-        self.render()
+        if changed and self.image is not None:
+            self.render()
+
+    def _imu_readout_changed(self, readout):
+        """新遥测是否越过刷新死区（首次收到读数视为变化）。
+
+        读数元组 = (温度, 俯仰, 横滚, 偏航, 磁场或 None)；前四项按标量阈值
+        比较，磁场按每轴阈值比较，出现/消失本身也视为变化。
+        """
+        previous = self._imu_readout
+        if previous is None:
+            return True
+        for old, new, eps in zip(previous, readout, self._IMU_READOUT_EPS):
+            if abs(new - old) > eps:
+                return True
+        old_magnetic, new_magnetic = previous[4], readout[4]
+        if (old_magnetic is None) != (new_magnetic is None):
+            return True
+        if old_magnetic is not None and any(
+                abs(new - old) > self._IMU_MAGNETIC_EPS
+                for old, new in zip(old_magnetic, new_magnetic)):
+            return True
+        return False
 
     def clear_imu_sensor_readout(self):
         """清除消融针传感器读数（例如串口断开时）。"""
+        # HUD 可见 ⟺ 已缓存读数且已加载体数据；两者任一不满足时本来就
+        # 不可见，清理纯属属性操作，无需为它渲染一帧。
+        hud_was_shown = self._imu_readout is not None and self.image is not None
         self._imu_readout = None
         self._refresh_imu_readout_overlay()
-        self.render()
+        if hud_was_shown:
+            self.render()
 
     # ============================================================
     # 消融范围椭球体
@@ -2977,10 +3462,13 @@ class VolumeViewer(QtWidgets.QWidget):
         return tuple(tip_world[i] - axis[i] * active_len for i in range(3))
 
     def _needle_visual_radius(self):
-        # 针的可见半径直接由"消融针仿真"的直径决定(直径/2)，让 3D 针、切片针
-        # 和入针点/消融点标记的粗细与直径设置保持一致；夹在可见范围内避免过细/过粗。
+        # 针的可见半径以直径为基础，但夹在 2.0~5.0mm 的可见区间。真实
+        # 直径(默认 1.6mm → 半径 0.8mm)在全身视角下只有约 4 像素粗，
+        # 针道和两端标记几乎不可见；按手术规划软件的惯例放大到视觉可辨
+        # 的粗细，同时仍随直径设置增减（3D 针、切片针道、入针点/消融点
+        # 标记共用此半径）。
         diameter = self._ablation_params["diameter_mm"]
-        return max(0.5, min(4.0, diameter * 0.5))
+        return max(2.0, min(5.0, diameter * 0.75))
 
     def _world_to_ijk(self, world):
         origin = self.image.GetOrigin()

@@ -50,12 +50,13 @@ import shutil
 import sys
 import tempfile
 import threading
+from datetime import datetime
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import (ablation, loader, microwave_ablator, needle_planning,
-               network_analyzer, presets, rtx_telemetry, segmentation,
-               serial_connection, style)
+               network_analyzer, planning_report, presets, rtx_telemetry,
+               segmentation, serial_connection, style)
 from .viewer import VolumeViewer
 
 log = logging.getLogger(__name__)
@@ -1663,6 +1664,101 @@ class DatasetLoadWorker(QtCore.QObject):
         self.finished.emit(*result)
 
 
+class _StepBadge(QtWidgets.QLabel):
+    """步骤徽章：QLabel 保证文字在固定圆形内像素级居中（QPushButton 的
+    盒模型受全局 padding 影响会让数字偏上），点击发 clicked 信号。"""
+
+    clicked = QtCore.Signal()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class PlanningStepsBar(QtWidgets.QWidget):
+    """主流程步骤指示条：可点击的圆形数字徽章 + 文字。
+
+    当前步金色实底、已完成绿色打勾、未到步灰描边（QSS 由 style.py 的
+    StepBadge/StepText/StepArrow 规则驱动，明暗主题自动适配）。徽章可
+    点击（stepClicked 信号），配合向导式翻页跳转。步骤多于 3 个时不画
+    箭头（面板宽度放不下），序号本身已表达先后。
+    """
+
+    stepClicked = QtCore.Signal(int)
+
+    def __init__(self, labels=None, tooltips=None, parent=None):
+        super().__init__(parent)
+        labels = tuple(labels) if labels else ("定位结节", "规划针道", "仿真并导出")
+        self._labels = labels
+        self._states = ("pending",) * len(labels)
+        self._badges = []
+        self._texts = []
+        self._segments = []
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 4, 0, 2)
+        outer.setSpacing(4)
+        lay = QtWidgets.QHBoxLayout()
+        lay.setSpacing(2)
+        outer.addLayout(lay)
+
+        for index, text in enumerate(labels):
+            badge = _StepBadge(str(index + 1), objectName="StepBadge")
+            badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            badge.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            badge.setMinimumSize(20, 20)
+            badge.setMaximumSize(20, 20)
+            if tooltips and index < len(tooltips):
+                badge.setToolTip(tooltips[index])
+            badge.clicked.connect(
+                lambda i=index: self.stepClicked.emit(i))
+            label = QtWidgets.QLabel(text, objectName="StepText")
+            self._badges.append(badge)
+            self._texts.append(label)
+            lay.addWidget(badge)
+            lay.addWidget(label)
+            if index < len(labels) - 1:
+                lay.addStretch(1)
+
+        # 五段式进度条：完成绿 / 当前金 / 未到灰，与徽章状态同步
+        segment_row = QtWidgets.QHBoxLayout()
+        segment_row.setSpacing(3)
+        for _index in range(len(labels)):
+            segment = QtWidgets.QFrame(objectName="ProgressSegment")
+            segment.setFixedHeight(4)
+            self._segments.append(segment)
+            segment_row.addWidget(segment, 1)
+        outer.addLayout(segment_row)
+        self.set_states(self._states)
+
+    def states(self):
+        return self._states
+
+    def badges(self):
+        return list(self._badges)
+
+    def set_states(self, states):
+        normalized = tuple(
+            state if state in ("pending", "active", "done") else "pending"
+            for state in states)
+        # 步数与徽章数不一致时按徽章数截断/补齐，防御调用方
+        self._states = (
+            normalized + ("pending",) * len(self._badges))[:len(self._badges)]
+        for index, state in enumerate(self._states):
+            badge = self._badges[index]
+            badge.setText("✓" if state == "done" else str(index + 1))
+            for widget in (badge, self._texts[index]):
+                widget.setProperty("state", state)
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+        for index, segment in enumerate(self._segments):
+            state = self._states[index] if index < len(self._states) else "pending"
+            segment.setProperty("state", state)
+            segment.style().unpolish(segment)
+            segment.style().polish(segment)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """应用程序主窗口。
     
@@ -1754,6 +1850,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.viewer = VolumeViewer()
         self.viewer.ablationNeedleChanged.connect(self._on_viewer_needle_changed)
+        # 规划点从任何入口(按钮/切片右键/推荐回填)变化都刷新状态行与步骤条
+        self.viewer.planningChanged.connect(self._update_plan_status)
         # 3D 视角交互结束后，空闲时段刷新文件对话框的毛玻璃背景缓存
         self.viewer.interactionEnded.connect(
             self._schedule_file_dialog_bg_refresh)
@@ -2480,43 +2578,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "切换为深色主题" if self._theme == "light" else "切换为浅色主题")
 
     def _build_operation_panel(self):
-        """把原左右两组控制合并为左侧单一滚动操作面板。"""
-        primary_scroll = self._build_panel()
-        simulation_scroll = self._build_simulation_panel()
-        primary_panel = primary_scroll.takeWidget()
-        simulation_panel = simulation_scroll.takeWidget()
-
-        # 去掉两段内容相接处的重复留白，使其看起来是一个连续面板。
-        if primary_panel is not None and primary_panel.layout() is not None:
-            margins = primary_panel.layout().contentsMargins()
-            primary_panel.layout().setContentsMargins(
-                margins.left(), margins.top(), margins.right(), 4)
-            primary_panel.setMinimumWidth(0)
-        if simulation_panel is not None and simulation_panel.layout() is not None:
-            margins = simulation_panel.layout().contentsMargins()
-            simulation_panel.layout().setContentsMargins(
-                margins.left(), 4, margins.right(), margins.bottom())
-            simulation_panel.setMinimumWidth(0)
-
-        content = QtWidgets.QFrame(objectName="Panel")
-        content.setMinimumWidth(316)
-        content_lay = QtWidgets.QVBoxLayout(content)
-        content_lay.setContentsMargins(0, 0, 0, 0)
-        content_lay.setSpacing(0)
-        if primary_panel is not None:
-            content_lay.addWidget(primary_panel)
-        if simulation_panel is not None:
-            content_lay.addWidget(simulation_panel)
-
-        scroll = QtWidgets.QScrollArea(objectName="PanelScroll")
-        scroll.setFixedWidth(336)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        scroll.setWidget(content)
-        primary_scroll.deleteLater()
-        simulation_scroll.deleteLater()
-        return scroll
+        """左侧单一滚动操作面板（主流程向导；消融仿真在向导第⑤页内）。"""
+        return self._build_panel()
 
     def _build_panel(self):
         """构建左侧控制面板（可滚动的参数控制区域）。
@@ -2538,13 +2601,13 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         scroll = QtWidgets.QScrollArea()
         scroll.setObjectName("PanelScroll")
-        scroll.setFixedWidth(330)
+        scroll.setFixedWidth(376)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
         panel = QtWidgets.QFrame(objectName="Panel")
-        panel.setMinimumWidth(312)
+        panel.setMinimumWidth(344)
         scroll.setWidget(panel)
         lay = QtWidgets.QVBoxLayout(panel)
         lay.setContentsMargins(18, 18, 18, 18)
@@ -2552,13 +2615,40 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 组织层已迁移到 3D 视图的右键菜单「组织」中(显示/隐藏 + 逐层透明度)。
 
+        # ===== 主流程向导：整个左面板一步一页，底部前后翻页 =====
+        # 加载影像 → 自动分割 → 定位结节 → 规划针道 → 导出核对单。
+        # 每页只放当前步骤的操作，注意力不被其他功能区分散；完成当前步
+        # 自动翻页，徽章/前后按钮随时可回看，不锁操作。
+        core = QtWidgets.QFrame(objectName="CorePanel")
+        core_lay = QtWidgets.QVBoxLayout(core)
+        core_lay.setContentsMargins(12, 8, 12, 12)
+        core_lay.setSpacing(8)
+        core_lay.addWidget(QtWidgets.QLabel("消融规划主流程", objectName="CorePanelTitle"))
+        self.plan_steps = PlanningStepsBar(
+            ("加载", "分割", "定位", "针道", "导出"),
+            tooltips=("加载影像", "自动分割", "定位结节", "规划针道", "导出核对单"))
+        self.plan_steps.stepClicked.connect(self._show_plan_page)
+        core_lay.addWidget(self.plan_steps)
+        self._plan_report_exported = False
+        self._plan_completed = 0
+        self._plan_pages = QtWidgets.QStackedWidget()
+        core_lay.addWidget(self._plan_pages, 1)
+
+        # ---- 第①页 加载影像 ----
+        page1 = QtWidgets.QWidget()
+        p1 = QtWidgets.QVBoxLayout(page1)
+        p1.setContentsMargins(0, 2, 0, 2)
+        p1.setSpacing(10)
+        p1.addWidget(self._page_header(
+            1, "加载影像", "导入 DICOM / 图片序列 / ZIP，确认后加载到中央视图。"))
+
         # 影像数据暂存区：导入只登记到列表，用户确认后才加载到中央视图。
         dataset_header = QtWidgets.QHBoxLayout()
         dataset_header.addWidget(self._section("影像数据"))
         dataset_header.addStretch(1)
         self.dataset_count = QtWidgets.QLabel("0 项", objectName="DatasetCount")
         dataset_header.addWidget(self.dataset_count, 0, QtCore.Qt.AlignVCenter)
-        lay.addLayout(dataset_header)
+        p1.addLayout(dataset_header)
 
         dataset_card = QtWidgets.QFrame(objectName="DatasetLibraryCard")
         dataset_lay = QtWidgets.QVBoxLayout(dataset_card)
@@ -2594,11 +2684,10 @@ class MainWindow(QtWidgets.QMainWindow):
         dataset_actions.addWidget(self.btn_dataset_load)
         dataset_actions.addWidget(self.btn_dataset_remove)
         dataset_lay.addLayout(dataset_actions)
-        lay.addWidget(dataset_card)
-        lay.addSpacing(6)
+        p1.addWidget(dataset_card)
 
         # 1 - Appearance
-        lay.addWidget(self._section("显示效果"))
+        p1.addWidget(self._section("显示效果"))
         seg = QtWidgets.QHBoxLayout()
         seg.setSpacing(8)
         self.btn_opaque = QtWidgets.QPushButton("不透明", objectName="Segment", checkable=True)
@@ -2613,7 +2702,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_transparent.clicked.connect(lambda: self._set_mode(self._min_opacity_scale()))
         seg.addWidget(self.btn_opaque)
         seg.addWidget(self.btn_transparent)
-        lay.addLayout(seg)
+        p1.addLayout(seg)
 
         op_row = QtWidgets.QHBoxLayout()
         op_row.addWidget(QtWidgets.QLabel("不透明度"))
@@ -2622,8 +2711,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.opacity_slider.setValue(int(OPAQUE_SCALE * 100))
         self.opacity_slider.set_mark_value(OPACITY_MARK_VALUE)   # 15% 参考刻度
         self.opacity_slider.valueChanged.connect(self._on_slider)
+        # 拖动时 valueChanged 每像素一报，而 set_opacity_scale 会重建传递函数
+        # 并渲染整个 3D 视图——按 ~25fps 合批，释放滑块时立即落最终值
+        # （与 viewer.py 图层菜单行 _LayerMenuRow 的做法一致）。
+        self._pending_opacity_scale = None
+        self._opacity_flush_timer = QtCore.QTimer(self)
+        self._opacity_flush_timer.setSingleShot(True)
+        self._opacity_flush_timer.setInterval(40)
+        self._opacity_flush_timer.timeout.connect(self._flush_opacity_scale)
+        self.opacity_slider.sliderReleased.connect(self._flush_opacity_scale)
         op_row.addWidget(self.opacity_slider, 1)
-        lay.addLayout(op_row)
+        p1.addLayout(op_row)
 
         z_row = QtWidgets.QHBoxLayout()
         z_lbl = QtWidgets.QLabel("Z 比例")
@@ -2636,15 +2734,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.z_spin.setToolTip(z_lbl.toolTip())
         self.z_spin.valueChanged.connect(self._on_z_spacing_changed)
         z_row.addWidget(self.z_spin, 1)
-        lay.addLayout(z_row)
+        p1.addLayout(z_row)
+        p1.addStretch(1)
+        self._plan_pages.addWidget(page1)
 
-        lay.addSpacing(6)
+        # ---- 第②页 自动分割 ----
+        page2 = QtWidgets.QWidget()
+        p2 = QtWidgets.QVBoxLayout(page2)
+        p2.setContentsMargins(0, 2, 0, 2)
+        p2.setSpacing(6)
+        p2.addWidget(self._page_header(
+            2, "自动分割", "AI 识别肺结节与器官；分割是推荐步骤，也可跳过。"))
 
         # AI - TotalSegmentator organs + MONAI lung-nodule segmentation
-        lay.addWidget(self._section("AI · 自动医学分割"))
+        p2.addWidget(self._section("AI · 自动医学分割"))
         self.seg_preset = NoWheelComboBox()
         self.seg_preset.addItems(segmentation.preset_names())
-        lay.addWidget(self.seg_preset)
+        p2.addWidget(self.seg_preset)
 
         seg_opts = QtWidgets.QHBoxLayout()
         seg_opts.setSpacing(8)
@@ -2660,7 +2766,7 @@ class MainWindow(QtWidgets.QMainWindow):
         seg_opts.addWidget(self.seg_fast)
         seg_opts.addWidget(self.seg_lowmem)
         seg_opts.addStretch(1)
-        lay.addLayout(seg_opts)
+        p2.addLayout(seg_opts)
 
         seg_device_row = QtWidgets.QHBoxLayout()
         seg_device_row.setSpacing(8)
@@ -2673,7 +2779,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "GPU 会使用显卡推理,通常更快并减少 CPU 内存压力。"
             "如果运行时报 CUDA/显存错误,再切回 CPU。")
         seg_device_row.addWidget(self.seg_device, 1)
-        lay.addLayout(seg_device_row)
+        p2.addLayout(seg_device_row)
 
         seg_actions = QtWidgets.QHBoxLayout()
         seg_actions.setSpacing(8)
@@ -2683,7 +2789,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_seg_download.clicked.connect(self._download_totalseg_weights)
         seg_actions.addWidget(self.btn_seg_run)
         seg_actions.addWidget(self.btn_seg_download)
-        lay.addLayout(seg_actions)
+        p2.addLayout(seg_actions)
 
         seg_view_actions = QtWidgets.QHBoxLayout()
         seg_view_actions.setSpacing(8)
@@ -2693,36 +2799,69 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_seg_clear.clicked.connect(self._clear_segmentations)
         seg_view_actions.addWidget(self.btn_seg_focus)
         seg_view_actions.addWidget(self.btn_seg_clear)
-        lay.addLayout(seg_view_actions)
+        p2.addLayout(seg_view_actions)
 
         self.seg_status = QtWidgets.QLabel(
             "调用 TotalSegmentator 生成器官 mask,并叠加到 3D 视图。", objectName="Status")
         self.seg_status.setWordWrap(True)
-        lay.addWidget(self.seg_status)
+        p2.addWidget(self.seg_status)
         self.seg_result = QtWidgets.QLabel("", objectName="Status")
         self.seg_result.setTextFormat(QtCore.Qt.RichText)
         self.seg_result.setWordWrap(True)
-        lay.addWidget(self.seg_result)
+        p2.addWidget(self.seg_result)
         self.seg_preset.currentTextChanged.connect(self._on_seg_preset_changed)
         self._on_seg_preset_changed()
+        p2.addStretch(1)
+        self._plan_pages.addWidget(page2)
 
-        lay.addSpacing(6)
+        # ---- 第③页 定位结节 ----
+        page3 = QtWidgets.QWidget()
+        p3 = QtWidgets.QVBoxLayout(page3)
+        p3.setContentsMargins(0, 2, 0, 2)
+        p3.setSpacing(6)
+        p3.addWidget(self._page_header(
+            3, "定位结节", "点击结节卡片即定位取景；双击卡片可放大经过结节的切片。"))
+        self.nodule_section = self._section("结节定位 · 点击列表定位取景")
+        self.nodule_section.setVisible(False)
+        p3.addWidget(self.nodule_section)
+        self.nodule_list = QtWidgets.QListWidget()
+        self.nodule_list.setObjectName("NoduleList")
+        self.nodule_list.setMaximumHeight(132)
+        self.nodule_list.setVisible(False)
+        self.nodule_list.itemClicked.connect(self._on_nodule_card_clicked)
+        self.nodule_list.itemActivated.connect(self._on_nodule_card_activated)
+        p3.addWidget(self.nodule_list)
+        self.nodule_empty_hint = QtWidgets.QLabel(
+            "先在第②页「自动分割」选择肺结节预设并运行，完成后这里会列出"
+            "每个结节（体积/深度），点击即可定位取景。", objectName="Status")
+        self.nodule_empty_hint.setWordWrap(True)
+        p3.addWidget(self.nodule_empty_hint)
+        p3.addStretch(1)
+        self._plan_pages.addWidget(page3)
+        self._nodule_cards = []
+        self._nodule_selected = None
 
-        # 针道规划 - 以坐标轴(参考十字)中心放置入针点/消融点，自动连成针道
-        lay.addWidget(self._section("针道规划 · 入针点/消融点(坐标轴定位)"))
+        # ---- 第④页 规划针道 ----
+        page4 = QtWidgets.QWidget()
+        p4 = QtWidgets.QVBoxLayout(page4)
+        p4.setContentsMargins(0, 2, 0, 2)
+        p4.setSpacing(6)
+        p4.addWidget(self._page_header(
+            4, "规划针道", "放置消融点后自动推荐避骨入针点，两点齐备连成针道。"))
+        p4.addWidget(self._section("针道规划 · 入针点/消融点"))
         plan_hint = QtWidgets.QLabel(
-            "拖动切片中的参考坐标轴到目标位置,再放置入针点/消融点;"
-            "两点都放好后自动检查骨骼并连成针道。先放置消融点后，也可自动推荐入针点。",
+            "双击/回车结节卡片定位并放大切片，或拖动切片十字到目标；"
+            "放好消融点后可自动推荐避骨入针点，两点齐备自动连成针道。",
             objectName="Status")
         plan_hint.setWordWrap(True)
-        lay.addWidget(plan_hint)
+        p4.addWidget(plan_hint)
 
         self.btn_plan_auto = QtWidgets.QPushButton(
             "自动推荐避骨入针点", objectName="Segment")
         self.btn_plan_auto.setToolTip(
             "根据当前消融点、针杆长度和 CT 骨密度，搜索可达且避开骨骼的体表入针点。")
         self.btn_plan_auto.clicked.connect(self._recommend_entry_point)
-        lay.addWidget(self.btn_plan_auto)
+        p4.addWidget(self.btn_plan_auto)
 
         plan_row = QtWidgets.QHBoxLayout()
         plan_row.setSpacing(8)
@@ -2735,40 +2874,67 @@ class MainWindow(QtWidgets.QMainWindow):
         plan_row.addWidget(self.btn_plan_entry)
         plan_row.addWidget(self.btn_plan_tip)
         plan_row.addWidget(self.btn_plan_clear)
-        lay.addLayout(plan_row)
+        p4.addLayout(plan_row)
 
         self.plan_status = QtWidgets.QLabel(
             "入针点:未放置   消融点:未放置", objectName="Status")
         self.plan_status.setWordWrap(True)
-        lay.addWidget(self.plan_status)
+        p4.addWidget(self.plan_status)
+        p4.addStretch(1)
+        self._plan_pages.addWidget(page4)
 
-        lay.addSpacing(6)
+        # ---- 第⑤页 仿真并导出 ----
+        page5 = QtWidgets.QWidget()
+        p5 = QtWidgets.QVBoxLayout(page5)
+        p5.setContentsMargins(0, 2, 0, 2)
+        p5.setSpacing(6)
+        p5.addWidget(self._page_header(
+            5, "仿真并导出", "确认针型与消融参数，运行仿真后导出规划核对单。"))
+        # 消融针仿真 + 消融仿真两区并入本页（原先堆在向导卡片下方）
+        self._fill_simulation_page(p5)
+        p5.addWidget(self._section("导出核对单"))
+        self.btn_plan_report = QtWidgets.QPushButton(
+            "导出规划核对单", objectName="Segment")
+        self.btn_plan_report.setToolTip(
+            "汇总当前结节定位、针道规划与消融参数，生成可打印的核对单（HTML）。")
+        self.btn_plan_report.clicked.connect(self._export_planning_report)
+        p5.addWidget(self.btn_plan_report)
+        p5.addStretch(1)
+        self._plan_pages.addWidget(page5)
 
+        # ---- 底部导航：分隔线 + 等宽对称大按钮 + 步数指示 ----
+        nav_divider = QtWidgets.QFrame(objectName="StepDivider")
+        nav_divider.setFixedHeight(1)
+        core_lay.addWidget(nav_divider)
+        nav_row = QtWidgets.QHBoxLayout()
+        nav_row.setSpacing(10)
+        self.btn_plan_prev = QtWidgets.QPushButton("◀  上一步", objectName="Segment")
+        self.btn_plan_next = QtWidgets.QPushButton("下一步  ▶", objectName="Primary")
+        for nav_button in (self.btn_plan_prev, self.btn_plan_next):
+            nav_button.setMinimumHeight(36)
+            nav_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.plan_page_label = QtWidgets.QLabel("", objectName="Status")
+        self.plan_page_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.btn_plan_prev.clicked.connect(
+            lambda: self._show_plan_page(self._plan_pages.currentIndex() - 1))
+        self.btn_plan_next.clicked.connect(
+            lambda: self._show_plan_page(self._plan_pages.currentIndex() + 1))
+        nav_row.addWidget(self.btn_plan_prev, 1)
+        nav_row.addWidget(self.plan_page_label, 0)
+        nav_row.addWidget(self.btn_plan_next, 1)
+        core_lay.addLayout(nav_row)
+        self._update_plan_nav()
 
-        lay.addStretch(1)
+        lay.addWidget(core, 1)
 
         return scroll
 
-    def _build_simulation_panel(self):
-        """构建右侧消融仿真面板。
+    def _fill_simulation_page(self, lay):
+        """向导第⑤页的消融仿真内容：针型参数 + 功率/时长/启停控制。
 
-        这里放置消融针型号与几何参数，以及功率、时间、进度和启停按钮，
-        让针参数和仿真控制集中在右侧。
+        原先是堆在向导卡片下方的独立面板；并入第⑤页后，"仿真并导出"
+        一页内即可完成确认针型 → 运行仿真 → 导出核对单的完整动作。
         """
-        scroll = QtWidgets.QScrollArea()
-        scroll.setObjectName("RightPanelScroll")
-        scroll.setFixedWidth(312)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-
-        panel = QtWidgets.QFrame(objectName="RightPanel")
-        panel.setMinimumWidth(294)
-        scroll.setWidget(panel)
-        lay = QtWidgets.QVBoxLayout(panel)
-        lay.setContentsMargins(18, 18, 18, 18)
-        lay.setSpacing(10)
-
         # 2 - Ablation needle planning
         lay.addWidget(self._section("消融针仿真"))
         self.needle_preset = NoWheelComboBox()
@@ -2881,10 +3047,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sim_elapsed = 0.0
         self._sim_duration = 300.0
         self._sim_power_w = 30.0
-
-        lay.addStretch(1)
-
-        return scroll
 
     def _build_mwa_panel(self):
         """按实体设备面板构建四通道微波消融仪显示与调节区。"""
@@ -4458,6 +4620,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_loaded_volume(self, image, info, label):
         """在 GUI 线程一次性接管解码结果，并更新界面状态。"""
         self._cancel_segmentation()
+        self._populate_nodule_cards(None)   # 旧病例的结节卡片不再有效
+        self._plan_report_exported = False
+        self._plan_completed = 0            # 完成步数重置;随后的状态刷新会把
+        # 向导自动翻到第②页(分割)——加载本身就是第①步的完成动作。
         self.viewer.set_volume(image, info)  # clears old data and schedules staged renders
         self._update_plan_status()  # set_volume cleared 入针点/消融点
         self._stop_simulation()  # reset sim UI to idle for the new volume
@@ -4507,15 +4673,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.opacity_slider.blockSignals(True)
         self.opacity_slider.setValue(int(scale * 100))
         self.opacity_slider.blockSignals(False)
+        # 拖动合批中可能还挂着一个旧值，丢弃并以本次按钮选择为准，
+        # 否则 40ms 后定时器会把过期值再覆盖回去。
+        self._pending_opacity_scale = None
+        self._opacity_flush_timer.stop()
         self.viewer.set_opacity_scale(scale)
 
     def _on_slider(self, value):
         """不透明度滑块拖动回调：将滑块值转为 0~1 系数，
         并自动更新不透明/透明按钮的选中状态（≥75% 为不透明）。
+
+        重渲染按 40ms 合批（见滑块创建处说明），这里只记录待落值。
         """
         scale = value / 100.0
         self.btn_opaque.setChecked(scale >= 0.75)
         self.btn_transparent.setChecked(scale < 0.75)
+        self._pending_opacity_scale = scale
+        self._opacity_flush_timer.start()
+
+    def _flush_opacity_scale(self):
+        """把合批中的最新不透明度真正应用到 3D 视图（定时器到期/释放滑块）。"""
+        if self._pending_opacity_scale is None:
+            return
+        scale, self._pending_opacity_scale = self._pending_opacity_scale, None
         self.viewer.set_opacity_scale(scale)
 
     def _on_z_spacing_changed(self, value):
@@ -4799,12 +4979,279 @@ class MainWindow(QtWidgets.QMainWindow):
         """两个 ijk 是否落在同一体素（用于提醒入针点/消融点重合）。"""
         return all(round(a[i]) == round(b[i]) for i in range(3))
 
+    # ---- 结节定位卡片与规划核对单 ---------------------------------------
+
+    def _populate_nodule_cards(self, cards):
+        """填充/清空结节定位卡片列表（肺结节分割完成后调用）。
+
+        每个连通域一张卡：体积 + 沿腹侧到体表的深度（与推荐入针点同一套
+        HU 体壁检测，单条射线，毫秒级）。cards 为 None/空 时隐藏整个区块。
+        """
+        self._nodule_cards = list(cards or [])
+        self._nodule_selected = None
+        self.nodule_list.clear()
+        has_cards = bool(self._nodule_cards)
+        self.nodule_section.setVisible(has_cards)
+        self.nodule_list.setVisible(has_cards)
+        empty_hint = getattr(self, "nodule_empty_hint", None)
+        if empty_hint is not None:
+            empty_hint.setVisible(not has_cards)
+        for index, card in enumerate(self._nodule_cards, start=1):
+            depth = self.viewer.nodule_depth_mm(card["ijk"])
+            card["depth_mm"] = depth
+            depth_text = "深度待复核" if depth is None else "距体表 %.0f mm" % depth
+            card["label"] = "结节 %d · %.2f ml · %s" % (
+                index, card["volume_ml"], depth_text)
+            QtWidgets.QListWidgetItem(card["label"], self.nodule_list)
+        self._refresh_nodule_card_labels()
+        self._update_plan_steps()
+
+    def _refresh_nodule_card_labels(self):
+        """按当前已定位行刷新卡片文案（定位过的卡片追加 ✓ 标记）。"""
+        located = getattr(self, "_nodule_selected", None)
+        for row in range(self.nodule_list.count()):
+            card = self._nodule_cards[row] if row < len(self._nodule_cards) else None
+            if card is None:
+                continue
+            text = card.get("label", "")
+            if row == located:
+                text += "  ✓"
+            self.nodule_list.item(row).setText(text)
+
+    def _on_nodule_card_clicked(self, item):
+        self._locate_nodule(self.nodule_list.row(item))
+
+    def _on_nodule_card_activated(self, item):
+        """双击/回车结节卡片：定位后直接放大经过该结节的轴状位切片。"""
+        row = self.nodule_list.row(item)
+        # 随后要展开切片浮层，跳过 3D 全屏取景，避免两次全屏过渡叠加。
+        self._locate_nodule(row, frame=False)
+        viewer = getattr(self, "viewer", None)
+        if viewer is None or viewer.image is None:
+            return
+        axial = next((v for v in viewer.slice_panel.views
+                      if getattr(v, "orientation", None) == "axial"), None)
+        if axial is not None:
+            viewer._show_expanded_slice(axial)
+
+    def _locate_nodule(self, row, frame=True):
+        """定位取景：十字移到该结节、骨骼调淡、相机转到腹侧、进入全屏。"""
+        if not hasattr(self, "viewer") or self.viewer.image is None:
+            return
+        cards = self._nodule_cards
+        if not cards or not 0 <= int(row) < len(cards):
+            return
+        row = int(row)
+        card = cards[row]
+        self._nodule_selected = row
+        self.nodule_list.setCurrentRow(row)
+        self._refresh_nodule_card_labels()
+        viewer = self.viewer
+        viewer.set_crosshair_ijk(card["ijk"])
+        # 结节观察取景：两层骨骼调淡让深部结节透出来，肺实质保持解剖衬托；
+        # 组织层的显示/透明度随时可在 3D 右键菜单手动恢复。
+        for bone_name in ("皮质骨", "松质骨 / 钙化"):
+            viewer.set_tissue_opacity(bone_name, 0.35)
+        viewer.focus_camera_on_ijk(card["ijk"])
+        viewer._flush_crosshair_update()
+        if frame:
+            viewer.enter_view3d_fullscreen()
+        self._update_plan_steps()
+        depth = card.get("depth_mm")
+        self.statusBar().showMessage(
+            "已定位到结节 %d/%d（约 %.2f ml%s）。双击 3D 视图可退出全屏，"
+            "请人工复核。" % (
+                row + 1, len(cards), card["volume_ml"],
+                "" if depth is None else "，距体表约 %.0f mm" % depth), 10000)
+
+    def _update_plan_steps(self):
+        """按 加载/分割/定位/针道/导出 五步进度刷新指示条与向导页。
+
+        分割是可选步骤：用户直接手动放置针道而跳过分割时，该步按
+        "已被跨过"处理（后面走到了，前面就算过），不应永远卡在分割步。
+        """
+        if not hasattr(self, "plan_steps"):
+            return
+        viewer = getattr(self, "viewer", None)
+        pts = viewer.planning_points() if viewer is not None else {}
+        conditions = (
+            viewer is not None and getattr(viewer, "image", None) is not None,
+            viewer is not None
+            and callable(getattr(viewer, "segmentation_names", None))
+            and bool(viewer.segmentation_names()),
+            getattr(self, "_nodule_selected", None) is not None
+            or pts.get("tip") is not None,
+            pts.get("entry") is not None and pts.get("tip") is not None,
+            getattr(self, "_plan_report_exported", False),
+        )
+        done = [False] * len(conditions)
+        for index in range(len(conditions) - 1, -1, -1):
+            done[index] = conditions[index] or any(done[index + 1:])
+        states = []
+        for index, is_done in enumerate(done):
+            if is_done:
+                states.append("done")
+            elif "active" not in states:
+                states.append("active")
+            else:
+                states.append("pending")
+        states = tuple(states)
+        self.plan_steps.set_states(states)
+        # 向导自动翻页：完成的步骤数前进时，翻到第一个未完成的步骤。
+        # 手动翻页不受影响——徽章和前后按钮随时可回看任意页。
+        completed = 0
+        for state in states:
+            if state == "done":
+                completed += 1
+            else:
+                break
+        if hasattr(self, "_plan_pages") \
+                and completed > getattr(self, "_plan_completed", 0):
+            self._show_plan_page(min(completed, self._plan_pages.count() - 1))
+        self._plan_completed = completed
+        # 当前步骤对应的行动控件金色描边——打开界面即可看出"下一步点哪"。
+        has_cards = bool(getattr(self, "_nodule_cards", None))
+        self._set_step_emphasis(
+            getattr(self, "btn_dataset_load", None), states[0] == "active")
+        self._set_step_emphasis(
+            getattr(self, "btn_seg_run", None),
+            states[1] == "active" or (states[2] == "active" and not has_cards))
+        self._set_step_emphasis(
+            getattr(self, "nodule_list", None),
+            states[2] == "active" and has_cards)
+        self._set_step_emphasis(
+            getattr(self, "btn_plan_auto", None), states[3] == "active")
+        self._set_step_emphasis(
+            getattr(self, "btn_plan_report", None), states[4] == "active")
+
+    def _show_plan_page(self, index):
+        """切换主流程向导到指定页（0/1/2…），并刷新翻页按钮可用性。"""
+        if not hasattr(self, "_plan_pages"):
+            return
+        index = max(0, min(int(index), self._plan_pages.count() - 1))
+        self._plan_pages.setCurrentIndex(index)
+        self._update_plan_nav()
+
+    def _update_plan_nav(self):
+        index = self._plan_pages.currentIndex()
+        count = self._plan_pages.count()
+        self.btn_plan_prev.setEnabled(index > 0)
+        self.btn_plan_next.setEnabled(index < count - 1)
+        self.plan_page_label.setText("第 %d / %d 步" % (index + 1, count))
+
+    def _page_header(self, number, title, subtitle):
+        """向导页的大号页头：步骤序号 + 标题 + 一句副标题。"""
+        head = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(head)
+        row.setContentsMargins(0, 2, 0, 4)
+        row.setSpacing(10)
+        num = QtWidgets.QLabel(str(number), objectName="PageNumber")
+        num.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        num.setFixedSize(30, 30)
+        column = QtWidgets.QVBoxLayout()
+        column.setSpacing(0)
+        title_label = QtWidgets.QLabel(title, objectName="PageTitle")
+        subtitle_label = QtWidgets.QLabel(subtitle, objectName="PageSubtitle")
+        subtitle_label.setWordWrap(True)
+        column.addWidget(title_label)
+        column.addWidget(subtitle_label)
+        row.addWidget(num, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        row.addLayout(column, 1)
+        return head
+
+    @staticmethod
+    def _set_step_emphasis(widget, on):
+        """当前步骤行动控件的强调描边（QSS 由 current_step 属性驱动）。"""
+        if widget is None:
+            return
+        widget.setProperty("current_step", bool(on))
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _collect_planning_report_data(self):
+        """汇总核对单所需的全部数据（患者/定位/针道/针型/截图）。"""
+        viewer = self.viewer
+        info = viewer.info or {}
+        try:
+            images = viewer.capture_report_pngs()
+        except Exception:
+            log.exception("抓取核对单截图失败")
+            images = {}
+        world = viewer.planning_world_points()
+        needle = viewer.ablation_params()
+        needle["preset"] = self.needle_preset.currentText()
+        cards = self._nodule_cards
+        nodule = None
+        if cards:
+            index = 0 if self._nodule_selected is None else self._nodule_selected
+            card = cards[min(index, len(cards) - 1)]
+            nodule = {
+                "index": index + 1,
+                "total": len(cards),
+                "volume_ml": card.get("volume_ml"),
+                "depth_mm": card.get("depth_mm"),
+            }
+        planning = None
+        if world.get("entry") is not None or world.get("tip") is not None:
+            planning = {
+                "entry_world": world.get("entry"),
+                "tip_world": world.get("tip"),
+                "length_mm": viewer.needle_path_length_mm(),
+                "angles": viewer.needle_axis_angles(),
+            }
+        return {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "patient": {
+                "name": info.get("patient_name", ""),
+                "id": info.get("patient_id", ""),
+                "study_date": info.get("study_date", ""),
+                "series": info.get("series_description", ""),
+            },
+            "nodule": nodule,
+            "planning": planning,
+            "needle": needle,
+            "zone": viewer.ablation_zone_info(),
+            "images": images or {},
+        }
+
+    def _export_planning_report(self):
+        """导出当前定位/规划状态的 HTML 核对单（浏览器打开即可打印）。"""
+        if not hasattr(self, "viewer") or self.viewer.image is None:
+            self.statusBar().showMessage("请先加载 CT，再导出规划核对单。")
+            return
+        try:
+            html_text = planning_report.build_html(
+                self._collect_planning_report_data())
+        except Exception:
+            log.exception("生成规划核对单失败")
+            QtWidgets.QMessageBox.critical(
+                self, "导出失败", "生成核对单内容时出错，详见日志。")
+            return
+        default_name = "CTto3D_规划核对单_%s.html" % (
+            datetime.now().strftime("%Y%m%d_%H%M%S"),)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出规划核对单", default_name, "HTML 核对单 (*.html)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(html_text)
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "导出失败", str(exc))
+            return
+        self.statusBar().showMessage("规划核对单已保存:%s" % path, 10000)
+        log.info("规划核对单已导出:%s", path)
+        self._plan_report_exported = True
+        self._update_plan_steps()
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
+
     def _clear_planning_points(self):
         """清除入针点/消融点及其连成的针道。"""
         if not hasattr(self, "viewer"):
             return
         self.viewer.clear_planning_points()
         self.viewer.clear_ablation_needle()
+        self._plan_report_exported = False   # 旧核对单对应的针道已不存在
         self._update_plan_status()
         self.statusBar().showMessage("针道(入针点/消融点)已清除。")
 
@@ -4834,12 +5281,18 @@ class MainWindow(QtWidgets.QMainWindow):
                     text += " · 路径 %.1f mm · 骨距%s" % (
                         analysis["path_length_mm"],
                         self._bone_clearance_text(analysis))
+            # 进针方向角与 3D 视图左上角叠加文字同源（与世界 X/Y/Z 轴夹角），
+            # 就近显示避免用户为读角度转动视角。
+            angles = self.viewer.needle_axis_angles()
+            if angles is not None:
+                text += " · 夹角 %.0f°/%.0f°/%.0f°" % angles
         elif entry is not None or tip is not None:
             analysis = self.viewer.evaluate_planning_point(
                 entry if entry is not None else tip)
             if analysis.get("available") and analysis.get("near_bone"):
                 text += " · ⚠ 当前位置近骨 %s" % self._bone_clearance_text(analysis)
         self.plan_status.setText(text)
+        self._update_plan_steps()
 
     def _on_viewer_needle_changed(self, has_needle):
         """VolumeViewer 的消融针状态变化时的回调。
@@ -5215,6 +5668,9 @@ class MainWindow(QtWidgets.QMainWindow):
         loaded_names = [item["name"] for item in loaded_items]
         nodule_view = (self._seg_engine == "monai_nodule"
                        and "lung_nodule" in loaded_names)
+        if not nodule_view:
+            # 换成其他分割任务后，上一轮的结节定位卡片不再有效。
+            self._populate_nodule_cards(None)
         focus = None
         if loaded_names:
             self._highlight_segmentations()
@@ -5240,21 +5696,27 @@ class MainWindow(QtWidgets.QMainWindow):
                         "已定位到最大结节: 质心=%s %.2fml, 连通域 %d 个",
                         tuple(round(v) for v in focus["ijk"]),
                         focus["volume_ml"], focus["components"])
+                # 结节定位卡片：列出全部结节区域供逐个点击定位（含最大者）。
+                self._populate_nodule_cards(next(
+                    (item.get("components") for item in loaded_items
+                     if item.get("name") == "lung_nodule"), None))
                 focus_text = (
                     ("<br>已自动定位到最大结节（约 %.2f ml，共 %d 个结节区域），"
-                     "参考坐标轴与三向切片已移至该结节中心。"
+                     "左侧「结节定位」列表可逐个查看。"
                      % (focus["volume_ml"], focus["components"]))
                     if focus is not None else "")
+                # 正文只留一行结论；完整清单挪到悬停提示，避免把左栏撑长。
                 self.seg_result.setText(
-                    "已加载肺结节体素级分割（研究用途）。<br>"
-                    "已自动隐藏除肺、骨以外的组织层，便于观察结节；"
-                    "3D 视图右键可控制显示并调整透明度。" + focus_text
-                    + "<br><br>"
-                    + self._format_segmentation_result(loaded_items))
+                    "肺结节分割已叠加（研究用途），已隐藏肺/骨以外组织层。"
+                    + focus_text)
+                self.seg_result.setToolTip(
+                    self._format_segmentation_result(loaded_items))
             else:
                 self.seg_result.setText(
-                    "已加载 %d 个肺部分割部位。<br>"
-                    "在 3D 视图右键可选择显示部位、查看颜色并调整透明度。" % loaded)
+                    "已加载 %d 个分割部位，悬停可查看清单；"
+                    "3D 视图右键可控制显示与透明度。" % loaded)
+                self.seg_result.setToolTip(
+                    self._format_segmentation_result(loaded_items))
             log.info("已载入自动分割: %s", ", ".join(
                 "%s(%.1fml/%dvox)" % (
                     item["name"], item["volume_ml"], item["voxels"])
@@ -5333,7 +5795,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     if name == "lung_nodule":
                         # 分割完成后要把参考坐标轴定位到最大结节，
                         # 载入时顺手算好质心，避免回头再碰 mask。
-                        item["focus"] = segmentation.largest_mask_component(mask)
+                        # 同时枚举全部连通域：结节定位卡片逐个点击用，
+                        # focus 直接取最大者，不再单独跑一遍洪泛。
+                        components = segmentation.mask_components(mask)
+                        item["components"] = components
+                        item["focus"] = (
+                            dict(components[0], components=len(components))
+                            if components else None)
                     loaded_items.append(item)
                 else:
                     skipped += 1
@@ -5360,6 +5828,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.viewer.set_all_tissues_visible(True)
         self.seg_status.setText("分割叠加已清除，组织层已恢复全部显示。")
         self.seg_result.setText("")
+        self._populate_nodule_cards(None)
         self.statusBar().showMessage("分割叠加已清除，组织层已恢复全部显示。")
 
     def _highlight_segmentations(self):
@@ -5373,21 +5842,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("已保留原始 CT 并调淡，突出彩色分割结果。")
 
     def _format_segmentation_result(self, loaded_items):
+        """分割清单纯文本（seg_result 的悬停提示用；正文只保留一行结论）。"""
         rows = []
         max_rows = 36
         for item in loaded_items[:max_rows]:
-            name = item["name"]
-            color = segmentation.segment_color(name)
-            rgb = tuple(max(0, min(255, int(c * 255))) for c in color)
-            label = segmentation.segment_display_name(name)
-            rows.append(
-                '<span style="color:rgb(%d,%d,%d);">■</span> %s %.1f ml / %d 体素' %
-                (rgb[0], rgb[1], rgb[2], label,
-                 item["volume_ml"], item["voxels"]))
+            rows.append("%s %.1f ml / %d 体素" % (
+                segmentation.segment_display_name(item["name"]),
+                item["volume_ml"], item["voxels"]))
         if len(loaded_items) > max_rows:
-            rows.append("... 还有 %d 个器官已加载到 3D/三视图中" % (
+            rows.append("... 还有 %d 个部位已加载到 3D/三视图" % (
                 len(loaded_items) - max_rows))
-        return "本次分割:<br>" + "<br>".join(rows)
+        return "本次分割:\n" + "\n".join(rows)
 
     def _cancel_segmentation(self):
         if self._seg_worker is not None and self._seg_thread is not None \

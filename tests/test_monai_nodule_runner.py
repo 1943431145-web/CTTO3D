@@ -58,6 +58,30 @@ class MonaiNoduleRunnerTests(unittest.TestCase):
         self.assertEqual(int(filtered.sum()), 8)
         self.assertEqual(filtered[0, 0, 0], 0)
 
+    def test_normalise_ct_maps_window_and_replaces_non_finite(self):
+        raw = np.array(
+            [-1200.0, -1000.0, -300.0, 400.0, 900.0, np.nan, np.inf, -np.inf],
+            dtype=np.float32)
+
+        out = runner._normalise_ct(raw)
+
+        self.assertEqual(out.dtype, np.float32)
+        self.assertTrue((out >= 0.0).all() and (out <= 1.0).all())
+        # nan/±inf 分别按 -1000/+400/-1000 替换后再窗口化
+        expected = [0.0, 0.0, 700.0 / 1400.0, 1.0, 1.0, 0.0, 1.0, 0.0]
+        for got, want in zip(out.tolist(), expected):
+            self.assertAlmostEqual(got, want, places=6)
+
+    def test_normalise_ct_reuses_float32_input_without_copy(self):
+        raw = np.zeros((2, 2, 2), dtype=np.float32)
+        raw[0, 0, 0] = 400.0
+
+        out = runner._normalise_ct(raw)
+
+        self.assertIs(out, raw)              # float32 输入零拷贝、原地修改
+        self.assertEqual(out[0, 0, 0], 1.0)
+        self.assertEqual(out[1, 1, 1], 1000.0 / 1400.0)
+
 
 if __name__ == "__main__":
     unittest.main()
